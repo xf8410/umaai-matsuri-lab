@@ -29,6 +29,15 @@ on:
       illguard:
         description: "MATSURI_ILLGUARD 恢复精神（不良状态盾）层数，0=不注入"
         default: "0"
+      pin_window:
+        description: "钉位穷举：教诲窗口下标 0-5（turn 2/11/23/35/47/59）；-1 = 不钉位跑基线"
+        default: "-1"
+      pin_positions:
+        description: "钉位穷举的互异落位数；0 = 自动（窗口 4/5 = 24，其余 = 120）"
+        default: "0"
+      pin_reps:
+        description: "每个落位重复几个种子（总数仍受 100 局硬上限）"
+        default: "1"
       config_overlay:
         description: "剧本配置覆盖层路径；填 none = 用仓内默认层 data/matsuri_config.toml"
         default: "lab/config/matsuri_config.toml"
@@ -98,6 +107,9 @@ jobs:
           MATSURI_SHIELD: ${{ github.event.inputs.shield || '0' }}
           MATSURI_ILLGUARD: ${{ github.event.inputs.illguard || '0' }}
           MATRIX_CARDS: ${{ github.event.inputs.cards }}
+          PIN_WINDOW: ${{ github.event.inputs.pin_window || '-1' }}
+          PIN_POSITIONS: ${{ github.event.inputs.pin_positions || '0' }}
+          PIN_REPS: ${{ github.event.inputs.pin_reps || '1' }}
         run: |
           set -euo pipefail
           COUNT="${{ github.event.inputs.count || '100' }}"
@@ -110,6 +122,12 @@ jobs:
                 --out artifacts/matrix)
           if [ -n "${MATRIX_CARDS:-}" ]; then
             ARGS+=(--cards "$MATRIX_CARDS")
+          fi
+          if [ "${PIN_WINDOW:--1}" != "-1" ]; then
+            ARGS+=(--pin-window "$PIN_WINDOW"
+                   --pin-positions "$PIN_POSITIONS"
+                   --pin-reps "$PIN_REPS")
+            echo "钉位穷举：窗口 $PIN_WINDOW · 落位数 $PIN_POSITIONS（0=自动）· 每落位 $PIN_REPS 种子"
           fi
           mkdir -p artifacts/matrix
           python3 scripts/matrix.py "${ARGS[@]}" > artifacts/matrix/run.log 2>&1
@@ -137,6 +155,14 @@ jobs:
           print(f"\n#### 守门链命中（合计 {sum(s['gate_hits'].values())} 次）\n")
           print("| 守门 | 次数 |\n|---|---|")
           for k, v in s["gate_hits"].items(): print(f"| {k} | {v} |")
+          pin = s.get("pin")
+          if pin:
+              b = pin.get("best") or {}
+              print(f"\n#### 钉位穷举 · 窗口 {pin['window']} · {pin['distinct_positions']} 个互异落位 · 钉位生效 {pin['pin_ok']} 局\n")
+              print(f"最优落位 **d{b.get('pos')}** 均分 **{b.get('mean')}**（{b.get('games')} 局，{b.get('min')}–{b.get('max')}）\n")
+              print("| 落位 | 局数 | 均分 | min | max |\n|---|---|---|---|---|")
+              for e in sorted(pin["table"], key=lambda x: -x["mean"])[:24]:
+                  print(f"| d{e['pos']} | {e['games']} | {e['mean']} | {e['min']} | {e['max']} |")
           print(f"\n#### buff 位置（教诲分配方案）Top · 每局均 {s.get('assign_windows')} 个窗口\n")
           print("| 方案 | 命中次数 |\n|---|---|")
           for name, n in s.get("assign_top", [])[:12]: print(f"| {name} | {n} |")

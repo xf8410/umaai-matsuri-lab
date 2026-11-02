@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import json
 import re
 import subprocess
@@ -46,6 +47,7 @@ PT_RE = re.compile(r"^PT\s+(\d+)")
 
 COLUMNS = [
     "seed", "score", "rank",
+    "pin_window", "pin_pos", "pin_ok",
     "speed", "stamina", "power", "guts", "wisdom", "five_sum", "pt",
     "act_levels", "act_level_max",
     "assign_count", "assign_picks",
@@ -101,6 +103,8 @@ def parse_game(stdout: str, stderr: str) -> dict:
     row["assign_count"] = len(picks)
     row["assign_picks"] = "|".join(picks)
 
+    row["pin_ok"] = int("钉位" in err)
+
     row["fusion_count"] = len(FUSION_RE.findall(err))
     row["assist_gain"] = len(re.findall(r"【助力支撑】T\d+ 稽古#\d+ 获得", err))
     row["assist_use"] = len(re.findall(r"【助力支撑】T\d+ 训练#\d+ 消耗", err))
@@ -119,6 +123,32 @@ def parse_game(stdout: str, stderr: str) -> dict:
     return row
 
 
+def pin_summary(rows: list[dict]) -> dict:
+    """钉位穷举汇总：每个互异落位的评分均值 / 局数 / 钉位是否真生效。"""
+    groups: dict[int, list[int]] = {}
+    for row in rows:
+        if str(row.get("score", "")).isdigit():
+            groups.setdefault(int(row["pin_pos"]), []).append(int(row["score"]))
+    table = [
+        {
+            "pos": pos,
+            "games": len(scores),
+            "mean": round(sum(scores) / len(scores), 1),
+            "min": min(scores),
+            "max": max(scores),
+        }
+        for pos, scores in sorted(groups.items())
+    ]
+    best = max(table, key=lambda entry: entry["mean"]) if table else None
+    return {
+        "window": rows[0].get("pin_window") if rows else None,
+        "distinct_positions": len(table),
+        "pin_ok": sum(int(row.get("pin_ok") or 0) for row in rows),
+        "best": best,
+        "table": table,
+    }
+
+
 def assign_detail(stderr: str) -> list[str]:
     """buff 选择明细：每个教诲窗口选了哪个排列方案，落地后 5 槽各是什么。"""
     err = strip_ansi(stderr)
@@ -135,13 +165,16 @@ def fusion_detail(stderr: str) -> list[str]:
     return [f"T{t} 演目{a}: {b}→{c}" for t, a, b, c in FUSION_RE.findall(err)]
 
 
-def run_one(binary: Path, seed: int, cards: str, repo: Path) -> tuple[dict, str, str]:
+def run_one(
+    binary: Path, seed: int, cards: str, repo: Path, env: dict[str, str] | None = None
+) -> tuple[dict, str, str]:
     overlay = repo / "ai_config.toml"
     cards_toml = ", ".join(c.strip() for c in cards.split(",") if c.strip())
     overlay.write_text(f'[sim]\nseed = {seed}\ncards = [{cards_toml}]\n', encoding="utf8")
     proc = subprocess.run(
         [str(binary), "matsuri"],
         cwd=repo, capture_output=True, text=True, errors="replace", timeout=600,
+        env={**os.environ, **env} if env else None,
     )
     row = parse_game(proc.stdout, proc.stderr)
     row["seed"] = seed
@@ -158,6 +191,12 @@ def main() -> int:
     ap.add_argument("--binary", default="target/release/matsuri")
     ap.add_argument("--out", default="artifacts/matrix")
     ap.add_argument("--keep-logs", type=int, default=3, help="保留前 N 局完整原始输出")
+    ap.add_argument("--pin-window", type=int, default=-1,
+                    help="钉位穷举：教诲窗口下标 0-5（turn 2/11/23/35/47/59）；-1 = 不钉位")
+    ap.add_argument("--pin-positions", type=int, default=0,
+                    help="钉位穷举的互异落位数；0 = 自动（窗口 4/5 为 24，其余 120）")
+    ap.add_argument("--pin-reps", type=int, default=1,
+                    help="每个落位重复几个种子（CRN 配对；总数仍受 100 局硬上限约束")
     args = ap.parse_args()
 
     repo = Path.cwd()
@@ -179,18 +218,30 @@ def main() -> int:
     out = Path(args.out)
     (out / "raw").mkdir(parents=True, exist_ok=True)
 
+    if args.pin_window >= 0:
+        positions = args.pin_positions or (24 if args.pin_window >= 4 else 120)
+        plan = [(args.start_seed + rep, args.pin_window, pos)
+                for pos in range(positions) for rep in range(args.pin_reps)]
+    else:
+        plan = [(args.start_seed + i, -1, -1) for i in range(args.count)]
+    if len(plan) > 100:
+        print(f"计划 {len(plan)} 局超过硬上限 100，截断", file=sys.stderr)
+        plan = plan[:100]
+    args.count = len(plan)
+
     rows, all_fusions, gate_counter = [], Counter(), Counter()
     assign_counter, assign_lines = Counter(), []
     with (out / "matrix.csv").open("w", newline="", encoding="utf8") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
-        for i in range(args.count):
-            seed = args.start_seed + i
+        for i, (seed, window, pos) in enumerate(plan):
+            env = {"MATSURI_ASSIGN_PIN": f"{window}:d{pos}"} if window >= 0 else None
             try:
-                row, tail, err = run_one(binary, seed, cards, repo)
+                row, tail, err = run_one(binary, seed, cards, repo, env)
             except subprocess.TimeoutExpired:
                 print(f"  seed {seed} 超时", file=sys.stderr)
                 row, tail, err = {"seed": seed, "parse_ok": 0}, "TIMEOUT", ""
+            row["pin_window"], row["pin_pos"] = window, pos
             rows.append(row)
             writer.writerow({c: row.get(c, "") for c in COLUMNS})
             fh.flush()
@@ -225,6 +276,7 @@ def main() -> int:
         "gate_hits": dict(gate_counter),
         "fusion_top": all_fusions.most_common(20),
         "assign_top": assign_counter.most_common(20),
+        "pin": pin_summary(rows) if args.pin_window >= 0 else None,
         "assign_windows": round(sum(assign_counter.values()) / max(len(rows), 1), 2),
     }
     (out / "assign_detail.md").write_text(

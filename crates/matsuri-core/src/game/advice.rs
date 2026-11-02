@@ -321,8 +321,11 @@ impl MatsuriGame {
 
     /// 实验室钩子：`MATSURI_ASSIGN_PIN` 钉死某个教诲窗口的落位（buff 位置穷举矩阵用）
     ///
-    /// 格式 `<窗口下标>:<方案>`，逗号分隔多个窗口；`<方案>` 可为
-    /// 5 位排列串（如 `41320`，= `AdviceAssignment` 的 Display）或候选下标（0–119）。
+    /// 格式 `<窗口下标>:<方案>`，逗号分隔多个窗口；`<方案>` 三种写法：
+    ///   - 5 位排列串（如 `41320`，= `AdviceAssignment` 的 Display）
+    ///   - 候选下标 `0`–`119`（`assignment_candidates` 的全排列序）
+    ///   - `d<N>`：**第 N 个互异落位**（按 `apply_assignment` 落地后的 `(slots, fused)` 去重）
+    ///
     /// 窗口下标 = `data.advice_windows` 下标（turn 2/11/23/35/47/59 → 0..5）。
     /// 未设置 / 不命中本窗口 / 解析失败 → `None`，走 Trainer 正常决策。
     fn pinned_assignment(&self, candidates: &[AdviceAssignment]) -> Option<usize> {
@@ -334,7 +337,11 @@ impl MatsuriGame {
                 continue;
             }
             let value = value.trim();
-            let hit = if value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit()) {
+            let hit = if let Some(rank) = value.strip_prefix('d') {
+                self.distinct_assignments(candidates)
+                    .get(rank.parse::<usize>().ok()?)
+                    .copied()
+            } else if value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit()) {
                 candidates
                     .iter()
                     .position(|candidate| candidate.to_string() == value)
@@ -342,18 +349,40 @@ impl MatsuriGame {
                 value
                     .parse::<usize>()
                     .ok()
-                    .filter(|&i| i < candidates.len())
+                    .filter(|&index| index < candidates.len())
             };
             let index = hit?;
             diag!(
-                "【教诲】T{} 钉位 窗口{} 方案 {}（MATSURI_ASSIGN_PIN）",
+                "【教诲】T{} 钉位 窗口{} 方案 {} → 候选{}（MATSURI_ASSIGN_PIN）",
                 self.turn(),
                 window,
-                value
+                value,
+                index
             );
             return Some(index);
         }
         None
+    }
+
+    /// 互异落位表：120 个排列按「落地后的 `(slots, fused)`」去重，保留首个下标
+    ///
+    /// turn 47 起 `fused` 里有 801，`enforce_advice_constraints` 会把它钉到担当最多的演目，
+    /// 于是 120 个排列塌成 4! = 24 个互异结果。位置穷举矩阵按这张表扫，才扫得动。
+    fn distinct_assignments(&self, candidates: &[AdviceAssignment]) -> Vec<usize> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        // 探针会真落地一次分配（含硬约束交换的 diag），全静默，别把日志刷成 120 行
+        let _quiet = umaai_core::diag::DiagGuard::suppress();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let mut probe = self.clone();
+            if probe.apply_assignment(candidate).is_err() {
+                continue;
+            }
+            if seen.insert((probe.advice.slots, probe.advice.fused)) {
+                out.push(index);
+            }
+        }
+        out
     }
 
     /// 找「研鑽（701）」当前所在演目（至多一个）
