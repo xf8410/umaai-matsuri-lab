@@ -166,11 +166,15 @@ def fusion_detail(stderr: str) -> list[str]:
 
 
 def run_one(
-    binary: Path, seed: int, cards: str, repo: Path, env: dict[str, str] | None = None
+    binary: Path, seed: int, cards: str, repo: Path, env: dict[str, str] | None = None,
+    uma: str = "",
 ) -> tuple[dict, str, str]:
     overlay = repo / "ai_config.toml"
     cards_toml = ", ".join(c.strip() for c in cards.split(",") if c.strip())
-    overlay.write_text(f'[sim]\nseed = {seed}\ncards = [{cards_toml}]\n', encoding="utf8")
+    body = f'[sim]\nseed = {seed}\ncards = [{cards_toml}]\n'
+    if uma:
+        body += f"uma = {uma}\n"
+    overlay.write_text(body, encoding="utf8")
     proc = subprocess.run(
         [str(binary), "matsuri"],
         cwd=repo, capture_output=True, text=True, errors="replace", timeout=600,
@@ -188,6 +192,8 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=100)
     ap.add_argument("--start-seed", type=int, default=61444)
     ap.add_argument("--cards", default="")
+    ap.add_argument("--uma", default="",
+                    help="育成马 gameId；空 = 用 data/ai_config.toml 的默认值")
     ap.add_argument("--binary", default="target/release/matsuri")
     ap.add_argument("--out", default="artifacts/matrix")
     ap.add_argument("--keep-logs", type=int, default=3, help="保留前 N 局完整原始输出")
@@ -215,6 +221,19 @@ def main() -> int:
         cards = m.group(1)
     print(f"卡组: {cards}")
 
+    uma = args.uma.strip()
+    if uma:
+        # 起跑前就把「马不存在 / 用了禁用马」拦住，别等 100 局全 fail
+        banned = {"106301", "106302"}
+        if uma in banned:
+            print(f"禁用马 gameId {uma}（轮椅超标角色），不跑", file=sys.stderr)
+            return 2
+        db = json.loads((repo / "data" / "umaDB.json").read_text(encoding="utf8"))
+        if uma not in db:
+            print(f"umaDB.json 里没有 gameId {uma}", file=sys.stderr)
+            return 2
+        print(f"育成马: {uma} {db[uma]['name']}")
+
     out = Path(args.out)
     (out / "raw").mkdir(parents=True, exist_ok=True)
 
@@ -237,7 +256,7 @@ def main() -> int:
         for i, (seed, window, pos) in enumerate(plan):
             env = {"MATSURI_ASSIGN_PIN": f"{window}:d{pos}"} if window >= 0 else None
             try:
-                row, tail, err = run_one(binary, seed, cards, repo, env)
+                row, tail, err = run_one(binary, seed, cards, repo, env, uma=uma)
             except subprocess.TimeoutExpired:
                 print(f"  seed {seed} 超时", file=sys.stderr)
                 row, tail, err = {"seed": seed, "parse_ok": 0}, "TIMEOUT", ""
@@ -271,6 +290,7 @@ def main() -> int:
         "count": args.count,
         "seeds": f"{args.start_seed}-{args.start_seed + args.count - 1}",
         "cards": cards,
+        "uma": uma or "default(data/ai_config.toml)",
         "parsed": len(scored),
         "mean": round(sum(scored) / len(scored), 1) if scored else None,
         "min": min(scored) if scored else None,
