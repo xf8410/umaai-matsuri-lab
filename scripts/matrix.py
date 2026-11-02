@@ -203,6 +203,10 @@ def main() -> int:
                     help="钉位穷举的互异落位数；0 = 自动（窗口 4/5 为 24，其余 120）")
     ap.add_argument("--pin-reps", type=int, default=1,
                     help="每个落位重复几个种子（CRN 配对；总数仍受 100 局硬上限约束")
+    ap.add_argument("--pin-route", default="",
+                    help="钉整条教示路线，原样传给 MATSURI_ASSIGN_PIN："
+                         "<窗口>:<id0>-<id1>-<id2>-<id3>-<id4>[,<窗口>:…]，"
+                         "id 为 buff id（101–501 基础 / 601–1001 転成），0 = 该位不限")
     args = ap.parse_args()
 
     repo = Path.cwd()
@@ -237,6 +241,19 @@ def main() -> int:
     out = Path(args.out)
     (out / "raw").mkdir(parents=True, exist_ok=True)
 
+    route = args.pin_route.strip()
+    if route:
+        # 路线写错会静默退回 AI 自选，100 局白跑 —— 起跑前先做形状校验
+        for entry in route.split(","):
+            win, _, ids = entry.strip().partition(":")
+            parts = ids.split("-")
+            if not win.isdigit() or not 0 <= int(win) <= 5 or len(parts) != 5 \
+                    or not all(p.strip().isdigit() for p in parts):
+                print(f"教示路线格式错: {entry!r}（应为 <窗口0-5>:<id>-<id>-<id>-<id>-<id>）",
+                      file=sys.stderr)
+                return 2
+        print(f"教示路线钉位: {route}")
+
     if args.pin_window >= 0:
         positions = args.pin_positions or (24 if args.pin_window >= 4 else 120)
         plan = [(args.start_seed + rep, args.pin_window, pos)
@@ -254,7 +271,8 @@ def main() -> int:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
         for i, (seed, window, pos) in enumerate(plan):
-            env = {"MATSURI_ASSIGN_PIN": f"{window}:d{pos}"} if window >= 0 else None
+            env = {"MATSURI_ASSIGN_PIN": route} if route else (
+                {"MATSURI_ASSIGN_PIN": f"{window}:d{pos}"} if window >= 0 else None)
             try:
                 row, tail, err = run_one(binary, seed, cards, repo, env, uma=uma)
             except subprocess.TimeoutExpired:
@@ -291,6 +309,7 @@ def main() -> int:
         "seeds": f"{args.start_seed}-{args.start_seed + args.count - 1}",
         "cards": cards,
         "uma": uma or "default(data/ai_config.toml)",
+        "pin_route": route or None,
         "parsed": len(scored),
         "mean": round(sum(scored) / len(scored), 1) if scored else None,
         "min": min(scored) if scored else None,

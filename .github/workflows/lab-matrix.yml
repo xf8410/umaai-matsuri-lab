@@ -41,6 +41,9 @@ on:
       pin_reps:
         description: "每个落位重复几个种子（总数仍受 100 局硬上限）"
         default: "1"
+      pin_route:
+        description: "钉整条教示路线：<窗口>:<id0>-<id1>-<id2>-<id3>-<id4>[,…]（id 为 buff id，0=该位不限）"
+        default: ""
       config_overlay:
         description: "剧本配置覆盖层路径；填 none = 用仓内默认层 data/matsuri_config.toml"
         default: "lab/config/matsuri_config.toml"
@@ -146,6 +149,7 @@ jobs:
           PIN_WINDOW: ${{ github.event.inputs.pin_window || '-1' }}
           PIN_POSITIONS: ${{ github.event.inputs.pin_positions || '0' }}
           PIN_REPS: ${{ github.event.inputs.pin_reps || '1' }}
+          PIN_ROUTE: ${{ github.event.inputs.pin_route }}
         run: |
           set -euo pipefail
           COUNT="${{ github.event.inputs.count || '100' }}"
@@ -162,6 +166,10 @@ jobs:
           if [ -n "${MATRIX_UMA:-}" ]; then
             ARGS+=(--uma "$MATRIX_UMA")
             echo "育成马: $MATRIX_UMA"
+          fi
+          if [ -n "${PIN_ROUTE:-}" ]; then
+            ARGS+=(--pin-route "$PIN_ROUTE")
+            echo "教示路线钉位: $PIN_ROUTE"
           fi
           if [ "${PIN_WINDOW:--1}" != "-1" ]; then
             ARGS+=(--pin-window "$PIN_WINDOW"
