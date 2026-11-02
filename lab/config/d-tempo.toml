@@ -1,12 +1,10 @@
 # 实验室覆盖层 · 动态权重变体 d-tempo
 # 单变量实验：在 w-uniform（当前最优，100 局均分 64509.8）之上只开一个动态旋钮。
 # 稽古节奏 keiko_tempo=1.0
-# 与达标线（Lv1→Senior合宿前 act_level_target→收尾 Lv10）比短板演目 Lv：
+# 与达标线（Lv1 → Senior 合宿前 act_level_target → 收尾 Lv10）比短板演目 Lv：
 # 落后 → level_value 放大（加速升级）；领先 → 缩小（卡回合，让休息/出行有机会赢）。
 # 全部动态旋钮默认 0 = 关闭；这里只开一个，便于归因。
-
-[fusion] 列表整段替换；[trainer] 给了就整段替换（不按字段合并）。
-#   所以本文件必须给全 trainer 的每一个键。
+# [trainer.dynamic] 有容器级 serde(default)，所以只写一个键、其余自动取 0。
 
 [fusion]
 year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]

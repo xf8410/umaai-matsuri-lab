@@ -92,13 +92,32 @@ jobs:
             exit 0
           fi
           test -f "$OVERLAY" || { echo "覆盖层不存在: $OVERLAY"; exit 1; }
+          # 覆盖层坏掉时要在跑 100 局之前就炸，而不是 parsed=0 之后才发现
+          python3 - "$OVERLAY" <<'PY'
+          import sys, tomllib
+          path = sys.argv[1]
+          with open(path, "rb") as fh:
+              cfg = tomllib.load(fh)
+          assert "fusion" in cfg, f"{path} 缺 [fusion]（整段替换语义要求覆盖层自带）"
+          trainer = cfg.get("trainer")
+          assert isinstance(trainer, dict), f"{path} 缺 [trainer]（给了就整段替换，必须给全每个键）"
+          need = {"pt_favor_rate", "rest_vital", "checkpoint_margin", "act_level_target",
+                  "self_race", "friend_outing_early", "status_weights", "weights", "advice"}
+          missing = need - set(trainer)
+          assert not missing, f"{path} [trainer] 缺键: {sorted(missing)}"
+          print(f"覆盖层校验通过: {path}（dynamic = {trainer.get('dynamic', {})}）")
+          PY
           cp "$OVERLAY" ./matsuri_config.toml
           { echo "覆盖层: $OVERLAY"; echo "---"; cat "$OVERLAY"; } | tee artifacts/matrix/config_overlay.txt
 
       - name: 复现锚点（单局 seed 61444）
         run: |
+          set -euo pipefail
           printf '[sim]\nseed = 61444\n' > ai_config.toml
-          ./target/release/matsuri matsuri | tail -20
+          ./target/release/matsuri matsuri 2>&1 | tee artifacts/matrix/anchor.log | tail -20
+          # 锚点局必须真跑出终局块；配置 / 数据坏了就在这里拦住，别浪费 100 局
+          grep -qE "^评分[[:space:]]+[0-9]+" artifacts/matrix/anchor.log \
+            || { echo "锚点局没有产出终局评分块，配置或数据有问题"; tail -30 artifacts/matrix/anchor.log; exit 1; }
           rm -f ai_config.toml
 
       - name: 跑矩阵
