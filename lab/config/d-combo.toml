@@ -1,0 +1,48 @@
+# 实验室覆盖层 · 动态权重组合档 d-combo
+# 单变量实测（100 局 CRN 配对，基线 w-uniform 64509.8）：
+#   status_catchup=1.0        +1539.8  t=+4.49  ← 唯一显著
+#   keiko_tempo=1.0            +193.5  t=+0.63  ← 噪声级
+#   act_catchup=0.5            +129.1  t=+0.56  ← 噪声级
+#   vital_decay/idle 0.5/1.0   -528.0  t=-1.44  ← 亏，关掉
+# 这一份把两个噪声级旋钮叠在赢家上，看是不是「单独不显著但互补」。
+# 体力那两个确定是亏的，保持 0。
+
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 2.2
+rest_vital = 48
+checkpoint_margin = 4
+act_level_target = 10
+self_race = false
+friend_outing_early = true
+status_weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+[trainer.weights]
+vital = 1.4
+motivation = 35.0
+friendship = 1.0
+hint = 1.0
+gauge = 28.0
+act_level = 180.0
+checkpoint = 1000.0
+fat = 130.0
+
+[trainer.advice]
+card = 1.1
+npc = 0.6
+train = 1.0
+keiko = 1.3
+level = 1.3
+milestone = 1.1
+
+[trainer.dynamic]
+status_catchup = 1.0
+act_catchup = 0.5
+keiko_tempo = 1.0
