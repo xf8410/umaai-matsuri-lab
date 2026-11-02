@@ -72,7 +72,7 @@ pub struct TrainerConfig {
 /// ② 演目 Lv 之间的追赶（治 `10/10/10/8/8` 这种长尾）；
 /// ③ 体力与进度的时间价值（末期体力不值钱、领先就该卡回合、落后就该加速升级）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct DynamicConfig {
     /// 五维追赶强度：`w[i] *= 1 + 2k(head[i] − mean_head)`，`head[i]` = 剩余空间占比
     pub status_catchup: f64,
