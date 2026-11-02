@@ -335,9 +335,14 @@ impl MatsuriGame {
             }
             let value = value.trim();
             let hit = if value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit()) {
-                candidates.iter().position(|candidate| candidate.to_string() == value)
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.to_string() == value)
             } else {
-                value.parse::<usize>().ok().filter(|&i| i < candidates.len())
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&i| i < candidates.len())
             };
             let index = hit?;
             diag!(
