@@ -29,6 +29,9 @@ on:
       illguard:
         description: "MATSURI_ILLGUARD 恢复精神（不良状态盾）层数，0=不注入"
         default: "0"
+      config_overlay:
+        description: "剧本配置覆盖层路径（留空=用仓内默认层 data/matsuri_config.toml）"
+        default: "lab/config/matsuri_config.toml"
   # 备用触发口：workflow_dispatch 只在默认分支存在该文件时才会出现在 UI 里，
   # 而本 workflow 只活在 lab/* 与 exp/* 分支上。推一根 exp/matrix/* 杈即可强制起一局矩阵。
   push:
@@ -66,6 +69,22 @@ jobs:
 
       - name: Build release bin
         run: cargo build --release --bin matsuri
+
+      # 覆盖层只落在运行目录（CWD），仓内默认层 data/matsuri_config.toml 保持上游原样 ——
+      # 默认层被 config.rs 的测试契约性钉死为 MatsuriConfig::default()，改它必红。
+      - name: 应用剧本配置覆盖层
+        env:
+          OVERLAY: ${{ github.event.inputs.config_overlay }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/matrix
+          if [ -z "${OVERLAY:-}" ]; then
+            echo "未指定覆盖层 → 用仓内默认层 data/matsuri_config.toml" | tee artifacts/matrix/config_overlay.txt
+            exit 0
+          fi
+          test -f "$OVERLAY" || { echo "覆盖层不存在: $OVERLAY"; exit 1; }
+          cp "$OVERLAY" ./matsuri_config.toml
+          { echo "覆盖层: $OVERLAY"; echo "---"; cat "$OVERLAY"; } | tee artifacts/matrix/config_overlay.txt
 
       - name: 复现锚点（单局 seed 61444）
         run: |
