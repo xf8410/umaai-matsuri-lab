@@ -303,7 +303,11 @@ impl MatsuriGame {
             .iter()
             .map(|assign| super::Action::AssignAdvice(*assign))
             .collect();
-        let index = trainer.select_action(self, &actions, decision)?;
+        // 实验室钉位钩子优先：命中就不问 Trainer（不消耗决策流，回放仍可复现）
+        let index = match self.pinned_assignment(&candidates) {
+            Some(index) => index,
+            None => trainer.select_action(self, &actions, decision)?,
+        };
         let Some(super::Action::AssignAdvice(assign)) = actions.get(index) else {
             bail!("教诲分配决策返回了下标 {index}，但候选不是分配方案");
         };
@@ -313,6 +317,38 @@ impl MatsuriGame {
             assign.slots().map(|slot| slot.to_string()).join("")
         );
         self.apply_assignment(assign)
+    }
+
+    /// 实验室钩子：`MATSURI_ASSIGN_PIN` 钉死某个教诲窗口的落位（buff 位置穷举矩阵用）
+    ///
+    /// 格式 `<窗口下标>:<方案>`，逗号分隔多个窗口；`<方案>` 可为
+    /// 5 位排列串（如 `41320`，= `AdviceAssignment` 的 Display）或候选下标（0–119）。
+    /// 窗口下标 = `data.advice_windows` 下标（turn 2/11/23/35/47/59 → 0..5）。
+    /// 未设置 / 不命中本窗口 / 解析失败 → `None`，走 Trainer 正常决策。
+    fn pinned_assignment(&self, candidates: &[AdviceAssignment]) -> Option<usize> {
+        let spec = std::env::var("MATSURI_ASSIGN_PIN").ok()?;
+        let window = self.plan.advice_window?;
+        for entry in spec.split(',') {
+            let (key, value) = entry.trim().split_once(':')?;
+            if key.trim().parse::<usize>().ok()? != window {
+                continue;
+            }
+            let value = value.trim();
+            let hit = if value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit()) {
+                candidates.iter().position(|candidate| candidate.to_string() == value)
+            } else {
+                value.parse::<usize>().ok().filter(|&i| i < candidates.len())
+            };
+            let index = hit?;
+            diag!(
+                "【教诲】T{} 钉位 窗口{} 方案 {}（MATSURI_ASSIGN_PIN）",
+                self.turn(),
+                window,
+                value
+            );
+            return Some(index);
+        }
+        None
     }
 
     /// 找「研鑽（701）」当前所在演目（至多一个）
