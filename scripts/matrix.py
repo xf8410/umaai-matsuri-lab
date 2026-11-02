@@ -37,7 +37,9 @@ GATES = [
 ]
 
 FUSION_RE = re.compile(r"【教诲】T(\d+) 融合 演目(\d+): (\d+)→(\d+)")
-ASSIGN_RE = re.compile(r"【教诲】T(\d+) 分配决策 方案 (.*)$")
+ASSIGN_RE = re.compile(r"【教诲】T(\d+) 分配决策 方案 (\S+)")
+# 落地后的槽内容（base 教诲 id + 融合对象 id），= 「这次到底选了什么 buff」
+ASSIGN_RESULT_RE = re.compile(r"【教诲】T(\d+) 分配 slots=\[([^\]]*)\] fused=\[([^\]]*)\]")
 ACTLV_RE = re.compile(r"演目Lv \[([0-9,\s]+)\]（上限 (\d+)）")
 SCORE_RE = re.compile(r"^评分\s+(\d+)\s+(\S+)")
 PT_RE = re.compile(r"^PT\s+(\d+)")
@@ -46,6 +48,7 @@ COLUMNS = [
     "seed", "score", "rank",
     "speed", "stamina", "power", "guts", "wisdom", "five_sum", "pt",
     "act_levels", "act_level_max",
+    "assign_count", "assign_picks",
     "fusion_count", "assist_gain", "assist_use",
     "kensan_hit", "kensan_used", "kensan_wasted",
     *[g[0] for g in GATES],
@@ -94,6 +97,10 @@ def parse_game(stdout: str, stderr: str) -> dict:
         row["act_levels"] = "/".join(map(str, levels))
         row["act_level_max"] = m.group(2)
 
+    picks = [f"T{t}:{scheme}" for t, scheme in ASSIGN_RE.findall(err)]
+    row["assign_count"] = len(picks)
+    row["assign_picks"] = "|".join(picks)
+
     row["fusion_count"] = len(FUSION_RE.findall(err))
     row["assist_gain"] = len(re.findall(r"【助力支撑】T\d+ 稽古#\d+ 获得", err))
     row["assist_use"] = len(re.findall(r"【助力支撑】T\d+ 训练#\d+ 消耗", err))
@@ -110,6 +117,16 @@ def parse_game(stdout: str, stderr: str) -> dict:
 
     row["parse_ok"] = int(bool(row["score"] and stats and row["act_levels"]))
     return row
+
+
+def assign_detail(stderr: str) -> list[str]:
+    """buff 选择明细：每个教诲窗口选了哪个排列方案，落地后 5 槽各是什么。"""
+    err = strip_ansi(stderr)
+    picks = dict(ASSIGN_RE.findall(err))
+    return [
+        f"T{t} 方案 {picks.get(t, '?')} → slots[{slots.strip()}] fused[{fused.strip()}]"
+        for t, slots, fused in ASSIGN_RESULT_RE.findall(err)
+    ]
 
 
 def fusion_detail(stderr: str) -> list[str]:
@@ -163,6 +180,7 @@ def main() -> int:
     (out / "raw").mkdir(parents=True, exist_ok=True)
 
     rows, all_fusions, gate_counter = [], Counter(), Counter()
+    assign_counter, assign_lines = Counter(), []
     with (out / "matrix.csv").open("w", newline="", encoding="utf8") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
@@ -181,6 +199,12 @@ def main() -> int:
                 (out / "raw" / f"{seed}.full.log").write_text(err, encoding="utf8")
             for d in fusion_detail(err):
                 all_fusions[d.split(" ", 1)[1]] += 1
+            details = assign_detail(err)
+            if details:
+                assign_lines.append(f"## seed {seed}\n" + "\n".join(details))
+            for line in details:
+                # 统计「选了哪个方案」，按窗口序号（第几次教诲窗口）分桶
+                assign_counter[line.split(" ")[1]] += 1
             for key, needle in GATES:
                 if row.get(key):
                     gate_counter[key] += int(row[key])
@@ -200,7 +224,11 @@ def main() -> int:
         "max": max(scored) if scored else None,
         "gate_hits": dict(gate_counter),
         "fusion_top": all_fusions.most_common(20),
+        "assign_top": assign_counter.most_common(20),
+        "assign_windows": round(sum(assign_counter.values()) / max(len(rows), 1), 2),
     }
+    (out / "assign_detail.md").write_text(
+        "\n\n".join(assign_lines), encoding="utf8")
     for axis in ("speed", "stamina", "power", "guts", "wisdom", "five_sum", "pt"):
         vals = [int(r[axis]) for r in rows if str(r.get(axis, "")).lstrip("-").isdigit()]
         summary[f"mean_{axis}"] = round(sum(vals) / len(vals), 1) if vals else None
