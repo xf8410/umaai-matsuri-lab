@@ -1,31 +1,62 @@
-# 骏大祭剧本仓 CI：需要把引擎仓检出到并列目录（默认 `../umaai_next`，仅作 path 依赖编译）。
-# 数据自持：引擎静态数据已拷入统一数据目录 `data/`（含双配置默认层），测试零参数即跑。
+# 骏大祭剧本仓 CI（lab 分支版）
+#
+# 配方来源：xf8410/umaai-matsuri@1928fb8「CI：修引擎检出与工具链，使三条门在 runner 上可跑」——
+# 上游 umaai-project/umaai-matsuri 的 ci.yml 至今 10 次全红（引擎检出位置 + 工具链版本两处问题），
+# 这份是实测跑绿过的版本，只把引擎源换成本账号的镜像分支。
+#
+# 两个关键点，改动前请先读懂：
+#   1. 根 Cargo.toml 的 path 依赖写的是 `../umaai_next`（工作区的**并列**目录），而
+#      actions/checkout 只能检进工作区内 → 检出后补一个并列位置的软链接。引擎缺失就该红，
+#      不要 continue-on-error（上游正是这么把失败吞掉的）。
+#   2. 工具链必须钉 1.99.0：更旧的 cargo 解析不动引擎清单（workspace `default-features` 覆盖），
+#      会把三条门全部带崩。
+#
+# 引擎 = xf8410/umaai-next@lab/ill-guard（上游 a8859e0 + 恢复精神盾 4 处）。
+# main 分支保持上游原样，不触发本 workflow。
 name: CI
 
 on:
   push:
+    branches: ["lab/**", "exp/**"]
   pull_request:
+    branches: ["lab/**", "exp/**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout engine repo
+
+      - name: Checkout engine repo (lab/ill-guard)
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/umaai-next
+          repository: xf8410/umaai-next
+          ref: lab/ill-guard
           path: umaai_next
-          token: ${{ secrets.ENGINE_REPO_TOKEN }}
-        continue-on-error: true
-      - uses: dtolnay/rust-toolchain@stable
+          token: ${{ secrets.ENGINE_REPO_TOKEN || github.token }}
+
+      - name: Link engine as sibling
+        run: |
+          ln -s "$GITHUB_WORKSPACE/umaai_next" "$GITHUB_WORKSPACE/../umaai_next"
+          test -f ../umaai_next/crates/umasim/Cargo.toml || { echo "引擎并列目录缺失"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
+
       - name: fmt
         run: cargo fmt --all --check
+
       - name: check
         run: cargo check --workspace --all-targets
+
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: test
-        run: cargo test --release
+        run: cargo test --workspace --release

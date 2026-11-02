@@ -35,6 +35,10 @@ const CLINIC_VALUE: f64 = 400.0;
 const OTHER_ILL_PENALTY: f64 = 40.0;
 /// 单次比赛的保底价值（强制比赛回合只有比赛一个候选）
 const FORCED_RACE_BASE: f64 = 500.0;
+/// 满体力闲逛惩罚（vital ≥ 70 时休息 / 普通出行扣分；GA 验证行为修正）
+const HIGH_VITAL_IDLE_PENALTY: f64 = 200.0;
+/// 满体力阈值
+const HIGH_VITAL_THRESHOLD: i32 = 70;
 
 /// 估算上下文（构造时一次算定，避免每次动作重复遍历人头）
 struct Context {
@@ -278,6 +282,10 @@ impl<'a> Model<'a> {
         if vital < rest_vital {
             value += f64::from(rest_vital - vital) * self.weights.vital * 0.5;
         }
+        // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时休息是浪费）
+        if vital >= HIGH_VITAL_THRESHOLD {
+            value -= HIGH_VITAL_IDLE_PENALTY;
+        }
         value
     }
 
@@ -300,7 +308,12 @@ impl<'a> Model<'a> {
                 .sum::<f64>()
                 / events.len() as f64
         };
-        expected + self.resource_value(&Action::NormalOuting)
+        let mut value = expected + self.resource_value(&Action::NormalOuting);
+        // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时普通出行是浪费）
+        if self.game.uma().vital >= HIGH_VITAL_THRESHOLD {
+            value -= HIGH_VITAL_IDLE_PENALTY;
+        }
+        value
     }
 
     /// 友人出行估值（段事件期望 + 最低演目 Lv+1 + 槽 +1；攻略「尽早用完」加分）

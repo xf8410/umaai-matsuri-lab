@@ -101,7 +101,81 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
             return Ok(index);
         }
 
-        // 守门 ②：强制比赛 / 强制休息回合候选只有一个，已在上面早退；
+        // 守门 ②：合宿禁令（合宿训练回合内休息 / 比赛 = 浪费训练等级 buff，强制不选）
+        // 体力危险线 32 以下仍保命休息
+        if game.plan.camp_train(game.forced_rest) && game.uma().vital > 32 {
+            let training_actions: Vec<usize> = actions
+                .iter()
+                .enumerate()
+                .filter(|(_, action)| {
+                    matches!(action, Action::Train(_) | Action::ActTrain(_))
+                })
+                .map(|(index, _)| index)
+                .collect();
+            if !training_actions.is_empty() {
+                // 合宿期间只从训练/稽古里选（进打分表但排除休息/比赛/出行）
+                let model = Model::new(game, &self.config.trainer)?;
+                let mut best = training_actions[0];
+                let mut best_value = f64::NEG_INFINITY;
+                for &index in &training_actions {
+                    let value = model.action_value(&actions[index]);
+                    if value.is_nan() {
+                        continue;
+                    }
+                    if value > best_value {
+                        best_value = value;
+                        best = index;
+                    }
+                }
+                diag!(
+                    "【决策】T{} 守门·合宿全练 {} 值={:.1}",
+                    game.turn(),
+                    actions.get(best).map(ToString::to_string).unwrap_or_default(),
+                    best_value
+                );
+                return Ok(best);
+            }
+        }
+
+        // 守门 ③：友人外出截止线（剩余次数 ≥ 剩余可用回合 → 强制友人外出）
+        if let Some(index) = actions.iter().position(|action| *action == Action::FriendOuting) {
+            let remaining_uses = game.friend.out_used.iter().filter(|used| !**used).count();
+            let remaining_turns = (game.max_turn() - game.turn()).max(0) as usize;
+            // 比赛回合不可出行，估算可用回合（排除约 18% 比赛/强制回合）
+            let usable_turns = (remaining_turns as f64 * 0.82) as usize;
+            if remaining_uses > 0 && remaining_uses >= usable_turns {
+                diag!(
+                    "【决策】T{} 守门·友人外出截止（剩{}次/可用{}回合）",
+                    game.turn(), remaining_uses, usable_turns
+                );
+                return Ok(index);
+            }
+        }
+
+        // 守门 ④：体力危险线（vital < 32 且非合宿 → 强制休息）
+        if game.uma().vital < 32 && !game.plan.camp_train(game.forced_rest) {
+            if let Some(index) = actions.iter().position(|action| *action == Action::Rest) {
+                diag!("【决策】T{} 守门·体力危险（{}<32）强制休息", game.turn(), game.uma().vital);
+                return Ok(index);
+            }
+        }
+
+        // 守门 ⑤：心情崩坏（干劲≤2 且体力>50 → 强制出行修心情）
+        // GA 战报「摆烂病」根因 + 作者确认：祭典杯友人不给心情盾，掉心情影响大
+        if game.uma().motivation <= 2 && game.uma().vital > 50
+            && !game.plan.camp_train(game.forced_rest)
+        {
+            // 优先友人出行（同时修心情 + 演目 Lv）
+            if let Some(index) = actions.iter().position(|action| *action == Action::FriendOuting) {
+                diag!("【决策】T{} 守门·心情崩坏→友人出行", game.turn());
+                return Ok(index);
+            }
+            if let Some(index) = actions.iter().position(|action| *action == Action::NormalOuting) {
+                diag!("【决策】T{} 守门·心情崩坏→普通出行", game.turn());
+                return Ok(index);
+            }
+        }
+
         // 其余全部进入打分表（训练 / 稽古 / 休息 / 出行 / 比赛同权比较）
         let model = Model::new(game, &self.config.trainer)?;
         let mut best = 0;

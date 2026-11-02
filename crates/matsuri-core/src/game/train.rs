@@ -213,8 +213,13 @@ impl MatsuriGame {
     /// 训练失败：二次判定大失败（生病 / 不擅长），按基础局口径直接结算失败事件
     fn apply_training_failure(&mut self, failure_rate: f64, rng: &mut impl Rng) -> Result<()> {
         let event = if rng.random_bool(failure_rate) {
-            self.uma_mut().flags.ill.insert(Ill::BAD_TRAINER);
-            self.uma_mut().flags.bad_trainer = true;
+            // 恢复精神盾：挡一次大失败的不良状态（不擅长训练）
+            if self.uma().flags.ill_guard_count > 0 {
+                self.uma_mut().flags.ill_guard_count -= 1;
+            } else {
+                self.uma_mut().flags.ill.insert(Ill::BAD_TRAINER);
+                self.uma_mut().flags.bad_trainer = true;
+            }
             diag!("【训练失败】T{} 大失败 → 生病 / 不擅长训练", self.turn());
             Data::get()?.system_event("training_fail_low")?.clone()
         } else {
