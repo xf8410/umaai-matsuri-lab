@@ -254,8 +254,10 @@ def main() -> int:
             if details:
                 assign_lines.append(f"## seed {seed}\n" + "\n".join(details))
             for line in details:
-                # 统计「选了哪个方案」，按窗口序号（第几次教诲窗口）分桶
-                assign_counter[line.split(" ")[1]] += 1
+                # 明细行形如「T2 方案 41320 → slots[..] fused[..]」，取第 3 段 = 方案本身
+                parts = line.split(" ")
+                if len(parts) > 2:
+                    assign_counter[f"{parts[0]} {parts[2]}"] += 1
             for key, needle in GATES:
                 if row.get(key):
                     gate_counter[key] += int(row[key])

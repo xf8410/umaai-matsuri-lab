@@ -57,6 +57,46 @@ pub struct TrainerConfig {
     pub weights: ValueWeights,
     /// 教诲分配价值权重
     pub advice: AdviceWeights,
+    /// 动态权重（随回合 / 饱和度 / 进度调制上面三套静态权重）
+    ///
+    /// `#[serde(default)]`：默认层文件不写这一段也能解析，缺省即全 0 = 静态行为。
+    #[serde(default)]
+    pub dynamic: DynamicConfig,
+}
+
+/// 动态权重旋钮（逐回合调制；全部默认 `0.0` = 关闭，完全退化成静态打分）
+///
+/// 设计口径：官方评分表本身是凸的，贪心按边际打分已经能吃掉「越接近上限越值钱」，
+/// 所以这里**不重复建模边际**，只补三件贪心看不见的事——
+/// ① 五维之间的追赶（速先满就该把回合让给根 / 智）；
+/// ② 演目 Lv 之间的追赶（治 `10/10/10/8/8` 这种长尾）；
+/// ③ 体力与进度的时间价值（末期体力不值钱、领先就该卡回合、落后就该加速升级）。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicConfig {
+    /// 五维追赶强度：`w[i] *= 1 + 2k(head[i] − mean_head)`，`head[i]` = 剩余空间占比
+    pub status_catchup: f64,
+    /// 演目 Lv 追赶强度：`level_value *= 1 + k·max(0, mean_lv − lv[act])`
+    pub act_catchup: f64,
+    /// 体力影子价格随回合衰减：`weights.vital *= 1 − k·(turn / max_turn)`
+    pub vital_decay: f64,
+    /// 满体力闲置惩罚放大：`idle_penalty *= 1 + k·(vital − 70) / 30`
+    pub vital_idle: f64,
+    /// 稽古节奏（卡回合 ↔ 加速升级）：`level_value *= 1 + k·(达标线 − 短板 Lv) / 3`
+    pub keiko_tempo: f64,
+}
+
+impl Default for DynamicConfig {
+    /// 全 0 = 关闭全部动态调制（与上游静态行为逐位相同）
+    fn default() -> Self {
+        Self {
+            status_catchup: 0.0,
+            act_catchup: 0.0,
+            vital_decay: 0.0,
+            vital_idle: 0.0,
+            keiko_tempo: 0.0,
+        }
+    }
 }
 
 /// 属性 / 资源 / 事件的折算权重（单位 = 评分点）
@@ -326,6 +366,20 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
             "trainer.{name} 应为非负有限数"
         );
     }
+    let dynamic = &trainer.dynamic;
+    let entries: [(&str, f64, f64); 5] = [
+        ("dynamic.status_catchup", dynamic.status_catchup, 4.0),
+        ("dynamic.act_catchup", dynamic.act_catchup, 2.0),
+        ("dynamic.vital_decay", dynamic.vital_decay, 1.0),
+        ("dynamic.vital_idle", dynamic.vital_idle, 4.0),
+        ("dynamic.keiko_tempo", dynamic.keiko_tempo, 4.0),
+    ];
+    for (name, value, upper) in entries {
+        ensure!(
+            value.is_finite() && (0.0..=upper).contains(&value),
+            "trainer.{name} 应在 0–{upper}（实际 {value}）"
+        );
+    }
     Ok(())
 }
 
@@ -393,6 +447,7 @@ impl Default for TrainerConfig {
                 level: 1.0,
                 milestone: 1.0,
             },
+            dynamic: DynamicConfig::default(),
         }
     }
 }
@@ -512,6 +567,55 @@ mod tests {
             MatsuriConfig::default().fusion,
             "fusion 段不受影响"
         );
+        assert_eq!(
+            cfg.trainer.dynamic,
+            DynamicConfig::default(),
+            "trainer.dynamic 缺省 = 全 0（关闭动态调制，退化成静态打分）"
+        );
+    }
+
+    /// 动态权重旋钮越界应被拒绝（扫参硬边界，不静默回退）
+    #[test]
+    fn dynamic_bad_values_rejected() {
+        let overlay = "[trainer]\n\
+                       pt_favor_rate = 2.0\n\
+                       rest_vital = 45\n\
+                       checkpoint_margin = 3\n\
+                       act_level_target = 8\n\
+                       self_race = false\n\
+                       friend_outing_early = true\n\
+                       status_weights = [1.0, 1.0, 1.0, 1.0, 1.0]\n\
+                       [trainer.weights]\n\
+                       vital = 1.2\n\
+                       motivation = 30.0\n\
+                       friendship = 0.6\n\
+                       hint = 1.0\n\
+                       gauge = 25.0\n\
+                       act_level = 120.0\n\
+                       checkpoint = 800.0\n\
+                       fat = 120.0\n\
+                       [trainer.advice]\n\
+                       card = 1.0\n\
+                       npc = 0.6\n\
+                       train = 1.0\n\
+                       keiko = 1.0\n\
+                       level = 1.0\n\
+                       milestone = 1.0\n\
+                       [trainer.dynamic]\n\
+                       vital_decay = 1.5\n";
+        assert!(
+            MatsuriConfig::parse(&repo_text(), Some(overlay)).is_err(),
+            "vital_decay 超过 1 应报错"
+        );
+        let bad = overlay.replace("vital_decay = 1.5", "status_catchup = -0.5");
+        assert!(
+            MatsuriConfig::parse(&repo_text(), Some(&bad)).is_err(),
+            "负的 status_catchup 应报错"
+        );
+        let ok = overlay.replace("vital_decay = 1.5", "keiko_tempo = 2.0");
+        let cfg = MatsuriConfig::parse(&repo_text(), Some(&ok)).expect("合法动态档应可解析");
+        assert_eq!(cfg.trainer.dynamic.keiko_tempo, 2.0);
+        assert_eq!(cfg.trainer.dynamic.act_catchup, 0.0, "未写的旋钮取 0");
     }
 
     #[test]

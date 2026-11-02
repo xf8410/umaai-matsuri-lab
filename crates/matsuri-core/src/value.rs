@@ -39,6 +39,8 @@ const FORCED_RACE_BASE: f64 = 500.0;
 const HIGH_VITAL_IDLE_PENALTY: f64 = 200.0;
 /// 满体力阈值
 const HIGH_VITAL_THRESHOLD: i32 = 70;
+/// 演目 Lv 上限（有 SSR 吾妻时可到 10）
+const ACT_LEVEL_CAP: i32 = 10;
 
 /// 估算上下文（构造时一次算定，避免每次动作重复遍历人头）
 struct Context {
@@ -60,6 +62,14 @@ struct Context {
     share: [f64; 5],
     /// 下一次発表会 / 本番
     checkpoint: Option<CheckpointCtx>,
+    /// 五维动态权重乘子（`status_catchup`；全 1 = 关闭）
+    dyn_status: [f64; 5],
+    /// 演目 Lv 动态权重乘子（`act_catchup`；全 1 = 关闭）
+    dyn_act: [f64; 5],
+    /// 体力影子价格乘子（`vital_decay`；1 = 关闭）
+    vital_scale: f64,
+    /// 稽古节奏乘子（`keiko_tempo`；1 = 关闭，>1 落后要加速，<1 领先可卡回合）
+    tempo_scale: f64,
 }
 
 /// 下一次発表会 / 本番的达标压力
@@ -147,6 +157,62 @@ impl<'a> Model<'a> {
                 turns_left: f64::from((schedule.turn - turn).max(0)),
             });
 
+        // ---- 动态权重（全部默认 0 → 乘子恒为 1，逐位退化成静态打分）----
+        let dynamic = &cfg.dynamic;
+        let max_turn = f64::from(game.max_turn().max(1));
+        let phase = (f64::from(turn) / max_turn).clamp(0.0, 1.0);
+
+        // ① 五维追赶：剩余空间占比高于均值的轴加权（速先满 → 把回合让给根 / 智）
+        let dyn_status = if dynamic.status_catchup > 0.0 {
+            let uma = game.uma();
+            let head: [f64; 5] = std::array::from_fn(|axis| {
+                let limit = uma.five_status_limit[axis].max(1);
+                let value = uma.five_status[axis].clamp(0, limit);
+                f64::from(limit - value) / f64::from(limit)
+            });
+            let mean = head.iter().sum::<f64>() / 5.0;
+            std::array::from_fn(|axis| {
+                (1.0 + dynamic.status_catchup * 2.0 * (head[axis] - mean)).max(0.0)
+            })
+        } else {
+            [1.0; 5]
+        };
+
+        // ② 演目 Lv 追赶：落后于全队均值的演目升级更值钱（治 10/10/10/8/8 长尾）
+        let level = game.acts.level;
+        let dyn_act = if dynamic.act_catchup > 0.0 {
+            let mean = level.iter().map(|value| f64::from(*value)).sum::<f64>() / 5.0;
+            std::array::from_fn(|act| {
+                let gap = (mean - f64::from(level[act])).max(0.0);
+                (1.0 + dynamic.act_catchup * gap).clamp(0.0, 4.0)
+            })
+        } else {
+            [1.0; 5]
+        };
+
+        // ③ 体力影子价格随回合衰减：末期每点体力换不到几次训练，不值钱了
+        let vital_scale = 1.0 - dynamic.vital_decay * phase;
+
+        // ④ 稽古节奏：与「达标线」比短板 Lv。落后 → 加速升级；领先 → 压低升级价值，
+        //    让休息 / 出行有机会赢，即「卡回合」把回合留给更好的机会。
+        //    达标线口径：Lv1 起，Senior 合宿前推到 `act_level_target`，收尾推到 Lv 上限。
+        let tempo_scale = if dynamic.keiko_tempo > 0.0 {
+            let target = f64::from(cfg.act_level_target.clamp(1, ACT_LEVEL_CAP));
+            let cap = f64::from(ACT_LEVEL_CAP);
+            let camp_turn = f64::from(game.data.camp.windows.get(2).map_or(60, |w| w.start));
+            let now = f64::from(turn);
+            let line = if now <= camp_turn {
+                1.0 + (target - 1.0) * (now / camp_turn.max(1.0))
+            } else {
+                let end = target.max(cap);
+                target + (end - target) * (now - camp_turn) / (max_turn - camp_turn).max(1.0)
+            };
+            let lead = f64::from(level.iter().min().copied().unwrap_or(1)) - line;
+            (1.0 - dynamic.keiko_tempo * lead / 3.0).clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+
         Ok(Self {
             game,
             consts,
@@ -165,6 +231,10 @@ impl<'a> Model<'a> {
                 avg_friend,
                 share,
                 checkpoint,
+                dyn_status,
+                dyn_act,
+                vital_scale,
+                tempo_scale,
             },
         })
     }
@@ -283,9 +353,7 @@ impl<'a> Model<'a> {
             value += f64::from(rest_vital - vital) * self.weights.vital * 0.5;
         }
         // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时休息是浪费）
-        if vital >= HIGH_VITAL_THRESHOLD {
-            value -= HIGH_VITAL_IDLE_PENALTY;
-        }
+        value -= self.idle_penalty(vital);
         value
     }
 
@@ -310,9 +378,7 @@ impl<'a> Model<'a> {
         };
         let mut value = expected + self.resource_value(&Action::NormalOuting);
         // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时普通出行是浪费）
-        if self.game.uma().vital >= HIGH_VITAL_THRESHOLD {
-            value -= HIGH_VITAL_IDLE_PENALTY;
-        }
+        value -= self.idle_penalty(self.game.uma().vital);
         value
     }
 
@@ -439,7 +505,8 @@ impl<'a> Model<'a> {
             let current = uma.five_status[axis];
             let after = (current + *gain).min(uma.five_status_limit[axis]);
             total += (self.status_score(axis, after) - self.status_score(axis, current))
-                * self.status_weights[axis];
+                * self.status_weights[axis]
+                * self.ctx.dyn_status[axis];
         }
         total
     }
@@ -466,7 +533,16 @@ impl<'a> Model<'a> {
         } else {
             155.0 + (value - 70.0)
         };
-        raw * self.weights.vital
+        raw * self.weights.vital * self.ctx.vital_scale
+    }
+
+    /// 满体力闲置惩罚（休息 / 普通出行；`vital_idle` 让它随超出量线性放大）
+    fn idle_penalty(&self, vital: i32) -> f64 {
+        if vital < HIGH_VITAL_THRESHOLD {
+            return 0.0;
+        }
+        let over = f64::from(vital - HIGH_VITAL_THRESHOLD);
+        HIGH_VITAL_IDLE_PENALTY * (1.0 + self.cfg.dynamic.vital_idle * over / 30.0)
     }
 
     /// 体力增量价值（按上限夹取）
@@ -573,7 +649,8 @@ impl<'a> Model<'a> {
             let urgency = ((30.0 - self.ctx.senior_camp_left).max(0.0) / 30.0).min(1.0);
             value += self.weights.act_level * (0.5 + urgency);
         }
-        value
+        // 动态调制：演目 Lv 追赶 × 稽古节奏（落后加速 / 领先卡回合）
+        value * self.ctx.dyn_act.get(act).copied().unwrap_or(1.0) * self.ctx.tempo_scale
     }
 
     /// 兑现「追加稽古」掷中的额外价值（该训练位参与者含研鑽绑定演目担当）
