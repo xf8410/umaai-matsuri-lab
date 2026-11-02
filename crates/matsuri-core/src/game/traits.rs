@@ -2,6 +2,8 @@
 //!
 //! 契约 trait 的 impl 必须整体落在同一文件；可拆的只有 inherent `impl`（见 AGENTS.md）。
 
+use crate::config::MatsuriConfig;
+use crate::trainer::MatsuriTrainer;
 use anyhow::{Result, anyhow};
 use rand::Rng;
 use rand::rngs::StdRng;
@@ -11,7 +13,6 @@ use umasim::game::{
     TrainingBasicTable, TrainingValueSource, Uma,
 };
 use umasim::search::FlatSearchGame;
-use umasim::trainer::RandomTrainer;
 
 use super::person::{MatsuriPerson, PersonOrigin};
 use super::{Action, EventRecord, MatsuriGame, Stage};
@@ -459,14 +460,15 @@ impl Game for MatsuriGame {
 }
 
 impl FlatSearchGame for MatsuriGame {
-    /// rollout 基策（S1 用契约参考实现；后续实现换成自己的策略）
-    type RolloutTrainer = RandomTrainer;
+    /// rollout 基策 = 本剧本的手写训练员（随机基策搜出来的动作价值没有可用口径）
+    type RolloutTrainer = MatsuriTrainer;
 
     /// 没有 leaf 估值器时声明 `false`：搜索入口会直接拒绝 `max_depth > 0`
     const SUPPORTS_TRUNCATED_LEAF: bool = false;
 
     fn default_rollout_trainer() -> Self::RolloutTrainer {
-        RandomTrainer
+        // 兜底用仓内默认档；调用方应经 `with_rollout_trainer` 注入随局配置
+        MatsuriTrainer::new(MatsuriConfig::default())
     }
 
     fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
@@ -479,5 +481,14 @@ impl FlatSearchGame for MatsuriGame {
         let mut game = self.clone();
         game.set_rule_master(rollout_seed);
         game
+    }
+
+    /// 搜索口径 = 官方评分本体（技能 + PT×`pt_score_rate` + 五维查表）
+    ///
+    /// 内核默认实现会把 PT **再乘一次** `pt_favor_rate`，而本剧本 `pt_score_rate`
+    /// 已是 2.0 —— 沿用等于按 PT×4 排序，与验收指标（终局「评分」）分叉。
+    /// 验收口径就是官方评分，故显式对齐，`pt_favor_rate` 不参与搜索排序。
+    fn search_score(&self, _pt_favor_rate: f64) -> Result<f64> {
+        Ok(self.uma().calc_score()? as f64)
     }
 }

@@ -207,6 +207,12 @@ def main() -> int:
                     help="钉整条教示路线，原样传给 MATSURI_ASSIGN_PIN："
                          "<窗口>:<id0>-<id1>-<id2>-<id3>-<id4>[,<窗口>:…]，"
                          "id 为 buff id（101–501 基础 / 601–1001 転成），0 = 该位不限")
+    ap.add_argument("--search-n", type=int, default=0,
+                    help="教诲决策点的蒙特卡洛次数（引擎 FlatSearch，0 = 关，纯手写打分）")
+    ap.add_argument("--search-topk", type=int, default=4,
+                    help="进搜索的候选数：手写打分排序后只搜前 K 个落位（全搜 24 个太贵）")
+    ap.add_argument("--search-radical", type=float, default=-1.0,
+                    help="搜索激进度因子上限（<0 = 沿用配置层；内核定档 50 偏高尾）")
     args = ap.parse_args()
 
     repo = Path.cwd()
@@ -271,8 +277,17 @@ def main() -> int:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
         for i, (seed, window, pos) in enumerate(plan):
-            env = {"MATSURI_ASSIGN_PIN": route} if route else (
-                {"MATSURI_ASSIGN_PIN": f"{window}:d{pos}"} if window >= 0 else None)
+            env = {}
+            if route:
+                env["MATSURI_ASSIGN_PIN"] = route
+            elif window >= 0:
+                env["MATSURI_ASSIGN_PIN"] = f"{window}:d{pos}"
+            if args.search_n > 0:
+                env["MATSURI_SEARCH_N"] = str(args.search_n)
+                env["MATSURI_SEARCH_TOPK"] = str(args.search_topk)
+                if args.search_radical >= 0:
+                    env["MATSURI_SEARCH_RADICAL"] = str(args.search_radical)
+            env = env or None
             try:
                 row, tail, err = run_one(binary, seed, cards, repo, env, uma=uma)
             except subprocess.TimeoutExpired:
@@ -310,6 +325,7 @@ def main() -> int:
         "cards": cards,
         "uma": uma or "default(data/ai_config.toml)",
         "pin_route": route or None,
+        "search_n": args.search_n, "search_topk": args.search_topk,
         "parsed": len(scored),
         "mean": round(sum(scored) / len(scored), 1) if scored else None,
         "min": min(scored) if scored else None,

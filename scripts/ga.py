@@ -140,6 +140,18 @@ def play(binary: Path, repo: Path, seed: int, uma: str, cards: str,
     return int(m.group(1)), detail
 
 
+def paired_stats(a: list[int], b: list[int]) -> tuple[float, float, int]:
+    """同种子配对差：均值 / t 值 / a 赢的局数。GA、BO、CMA-ES 共用一套判据。"""
+    paired = [x - y for x, y in zip(a, b)]
+    n = len(paired)
+    if not n:
+        return 0.0, 0.0, 0
+    mean = sum(paired) / n
+    var = sum((x - mean) ** 2 for x in paired) / n
+    return mean, (mean / ((var ** 0.5) / (n ** 0.5)) if var else 0.0), \
+        sum(1 for x in paired if x > 0)
+
+
 def evaluate(g: dict[str, float], repo: Path, binary: Path, seeds: list[int],
              uma: str, cards: str, route: str = "") -> dict:
     """CRN：同一个体跑完整个种子集，取均分。"""
@@ -305,16 +317,12 @@ def main() -> int:
     champ_h = evaluate(champion, repo, binary, holdout, args.uma, args.cards, args.pin_route)
     print("留出集评估基线 …", flush=True)
     base_h = evaluate(base_g, repo, binary, holdout, args.uma, args.cards, args.pin_route)
-    paired = [a - b for a, b in zip(champ_h["scores"], base_h["scores"])]
-    n = len(paired)
-    mean = sum(paired) / n
-    var = sum((x - mean) ** 2 for x in paired) / n
-    t = mean / ((var ** 0.5) / (n ** 0.5)) if var else 0.0
+    mean, _t, wins = paired_stats(champ_h["scores"], base_h["scores"])
     report = {
         "champion_holdout": {k: v for k, v in champ_h.items() if k != "scores"},
         "baseline_holdout": {k: v for k, v in base_h.items() if k != "scores"},
-        "paired_delta": round(mean, 1), "paired_t": round(t, 2),
-        "champion_wins": sum(1 for x in paired if x > 0), "n": n,
+        "paired_delta": round(mean, 1), "paired_t": round(_t, 2),
+        "champion_wins": wins, "n": len(champ_h["scores"]),
     }
     (out / "holdout.json").write_text(json.dumps(report, ensure_ascii=False, indent=2),
                                       encoding="utf8")
