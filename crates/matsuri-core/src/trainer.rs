@@ -159,15 +159,16 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
         }
 
         // 守门 ④：体力危险线（vital < 32 且非合宿 → 强制休息）
-        if game.uma().vital < 32 && !game.plan.camp_train(game.forced_rest) {
-            if let Some(index) = actions.iter().position(|action| *action == Action::Rest) {
-                diag!(
-                    "【决策】T{} 守门·体力危险（{}<32）强制休息",
-                    game.turn(),
-                    game.uma().vital
-                );
-                return Ok(index);
-            }
+        if game.uma().vital < 32
+            && !game.plan.camp_train(game.forced_rest)
+            && let Some(index) = actions.iter().position(|action| *action == Action::Rest)
+        {
+            diag!(
+                "【决策】T{} 守门·体力危险（{}<32）强制休息",
+                game.turn(),
+                game.uma().vital
+            );
+            return Ok(index);
         }
 
         // 守门 ⑤：心情崩坏（干劲≤2 且体力>50 → 强制出行修心情）

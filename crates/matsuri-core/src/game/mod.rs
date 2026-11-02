@@ -211,15 +211,15 @@ impl MatsuriGame {
         };
         game.init_persons()?;
         // 实验钩子：注入开局双盾层数，量化「精神防护(心情盾)/恢复精神(不良状态盾)」价值
-        if let Ok(v) = std::env::var("MATSURI_SHIELD") {
-            if let Ok(k) = v.parse::<i32>() {
-                game.base.uma.flags.positive_thinking_count = k;
-            }
+        if let Ok(v) = std::env::var("MATSURI_SHIELD")
+            && let Ok(k) = v.parse::<i32>()
+        {
+            game.base.uma.flags.positive_thinking_count = k;
         }
-        if let Ok(v) = std::env::var("MATSURI_ILLGUARD") {
-            if let Ok(k) = v.parse::<i32>() {
-                game.base.uma.flags.ill_guard_count = k;
-            }
+        if let Ok(v) = std::env::var("MATSURI_ILLGUARD")
+            && let Ok(k) = v.parse::<i32>()
+        {
+            game.base.uma.flags.ill_guard_count = k;
         }
         Ok(game)
     }
