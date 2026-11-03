@@ -40,6 +40,25 @@ const HIGH_VITAL_THRESHOLD: i32 = 70;
 /// 演目 Lv 上限（有 SSR 吾妻时可到 10）
 const ACT_LEVEL_CAP: i32 = 10;
 
+/// 拉面式属性上限软约束函数（xulai1001/umaai-rs handwritten_evaluator.rs::status_soft_function
+/// 原样移植，见 lab/属性溢出软上限旋钮移植.md §3.1）。
+///
+/// `x` = 当前相对「有效上限」的超出量（x<0 表示仍有余量，x>=0 表示已到/超上限）；
+/// `reserve` = 软约束带宽（储备带）。返回软约束下的「有效位置」，两处取值之差 = 软折扣后的边际。
+fn status_soft_function(x: f64, reserve: f64) -> f64 {
+    if reserve <= 0.0 {
+        return x.min(0.0); // 储备带为 0 → 退化成硬上限（只认负余量）
+    }
+    let reserve_inv_x2 = 1.0 / (2.0 * reserve);
+    if x >= 0.0 {
+        0.0 // 已到/超上限 → 边际归零
+    } else if x > -reserve {
+        -x * x * reserve_inv_x2 * 0.5 // 储备带内 → 二次折扣 = -x²/(4·reserve)
+    } else {
+        x + 0.25 * reserve // 远离上限 → 线性（≈全额）
+    }
+}
+
 /// 离线搜索蒸馏出的教诲落位先验（`scripts/tabu_route.py` 轮次 7 的禁忌搜索路线）
 ///
 /// 行 = 教诲窗口（`data.advice_windows`，turn 2/11/23/35/47/59），列 = 演目（速/耐/力/根/智），
@@ -612,8 +631,27 @@ impl<'a> Model<'a> {
     ///
     /// 阈值与上限都用模拟器的原始（非减半）坐标——实机减半的是**入账**不是面板数值，
     /// 所以无需对阈值做面板换算（`status_halve_threshold = 0` = 关闭，返回截断后的原值）。
+    ///
+    /// `status_soft_reserve = true` 时改走拉面式「时间感知软上限储备」分支
+    /// （移植自 xulai1001/umaai-rs handwritten_evaluator.rs，见 lab/属性溢出软上限旋钮移植.md）。
     fn effective_status_gain(&self, axis: usize, current: i32, gain: i32) -> i32 {
         let limit = self.game.uma().five_status_limit[axis];
+
+        // —— 分支 A：拉面式时间感知软上限储备 ——
+        if self.cfg.status_soft_reserve {
+            let remain_turn = f64::from((self.game.max_turn() - self.game.turn() - 1).max(0));
+            let total_turn = f64::from(self.game.max_turn().max(1));
+            let reserve = self.cfg.reserve_status_factor
+                * remain_turn
+                * (1.0 - remain_turn / (total_turn * 2.0));
+            let remain = limit - current - self.cfg.final_bonus;
+            let s0 = status_soft_function(-f64::from(remain), reserve);
+            let s1 = status_soft_function(f64::from(gain - remain), reserve);
+            // s1−s0 = 软折扣后的「有效入账属性点」：远离上限≈gain，储备带内折扣，越上限=0
+            return ((s1 - s0).round() as i32).clamp(0, gain.max(0));
+        }
+
+        // —— 分支 B：现行「上限截断 + 超阈值减半」——
         let capped = ((current + gain).min(limit) - current).max(0);
         if capped == 0 || self.cfg.status_halve_threshold <= 0 {
             return capped;

@@ -31,6 +31,11 @@ fn default_halve_factor() -> f64 {
     0.5
 }
 
+/// `reserve_status_factor` 的 serde 缺省值（拉面 RESERVE_STATUS_FACTOR = 40）。
+fn default_reserve_factor() -> f64 {
+    40.0
+}
+
 /// 剧本专属配置段
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +75,19 @@ pub struct TrainerConfig {
     /// 超阈值部分保留的比例（0.5 = 减半；1.0 = 不减半；配合 `status_halve_threshold` 用）
     #[serde(default = "default_halve_factor")]
     pub status_halve_factor: f64,
+    /// 属性溢出模式：false = 现行「上限截断 + 超阈值减半」；true = 拉面式「时间感知软上限储备」。
+    /// 移植自 `xulai1001/umaai-rs` handwritten_evaluator.rs::status_soft_function（见
+    /// lab/属性溢出软上限旋钮移植.md）。默认关闭，不改变现有行为。
+    #[serde(default)]
+    pub status_soft_reserve: bool,
+    /// 软上限储备因子（拉面 RESERVE_STATUS_FACTOR = 40）。
+    /// reserve = factor × 剩余回合 × (1 − 剩余回合 /(2×总回合))；0 = 关闭软储备（退化硬上限）。
+    #[serde(default = "default_reserve_factor")]
+    pub reserve_status_factor: f64,
+    /// 终局事件预留属性（拉面 FINAL_BONUS = 115，URA 口径）。
+    /// 骏大祭终局事件不同，默认 0（不预留），重标定后再设。
+    #[serde(default)]
+    pub final_bonus: i32,
     /// 友人外出截止回合（0 = 自动取 Senior 合宿窗口起点，即「第三年 10 月上」前后）。
     /// 截止前必须把 5 段用完，越接近截止、剩余段数越多，打分越急迫。
     #[serde(default)]
@@ -410,6 +428,15 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         "trainer.status_halve_factor 应在 0–1（0.5 = 超阈值减半）"
     );
     ensure!(
+        trainer.reserve_status_factor.is_finite()
+            && (0.0..=200.0).contains(&trainer.reserve_status_factor),
+        "trainer.reserve_status_factor 应在 0–200（0 = 关闭软储备）"
+    );
+    ensure!(
+        (0..=600).contains(&trainer.final_bonus),
+        "trainer.final_bonus 应在 0–600"
+    );
+    ensure!(
         (0..=77).contains(&trainer.friend_outing_deadline),
         "trainer.friend_outing_deadline 应在 0–77（0 = 自动取 Senior 合宿起点）"
     );
@@ -503,6 +530,9 @@ impl Default for TrainerConfig {
             friend_outing_early: true,
             status_halve_threshold: 0,
             status_halve_factor: 0.5,
+            status_soft_reserve: false,
+            reserve_status_factor: 40.0,
+            final_bonus: 0,
             friend_outing_deadline: 0,
             friend_outing_urgency: 0.0,
             level_step_bonus: 0.0,
