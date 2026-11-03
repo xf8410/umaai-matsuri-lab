@@ -137,6 +137,20 @@ pub struct AdviceWeights {
     pub level: f64,
     /// 発表会达标急迫度权重
     pub milestone: f64,
+    /// 特化上限（601 特別稽古的 `status_limit`）权重
+    ///
+    /// `#[serde(default)]`：旧覆盖层不写也能解析，缺省 `0.0` = 与既有行为逐位一致。
+    #[serde(default)]
+    pub status_limit: f64,
+    /// 助力の支え（401 的 `support_assist` 开关量）权重
+    #[serde(default)]
+    pub assist: f64,
+    /// 落位先验权重：命中一位离线搜出的落位加这么多分（0 = 关闭）
+    ///
+    /// 先验表见 [`crate::value::ROUTE_PRIOR`]，由 `scripts/tabu_route.py` 离线搜出后内化，
+    /// 目的是不再依赖 `MATSURI_ASSIGN_PIN` 外部钉位。取值足够大时等价于硬钉位。
+    #[serde(default)]
+    pub route: f64,
 }
 
 /// 融合预设：第 2 年 2 组、第 3 年剩余 3 组
@@ -352,13 +366,16 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         );
     }
     let advice = &trainer.advice;
-    let entries: [(&str, f64); 6] = [
+    let entries: [(&str, f64); 9] = [
         ("advice.card", advice.card),
         ("advice.npc", advice.npc),
         ("advice.train", advice.train),
         ("advice.keiko", advice.keiko),
         ("advice.level", advice.level),
         ("advice.milestone", advice.milestone),
+        ("advice.status_limit", advice.status_limit),
+        ("advice.assist", advice.assist),
+        ("advice.route", advice.route),
     ];
     for (name, value) in entries {
         ensure!(
@@ -446,6 +463,9 @@ impl Default for TrainerConfig {
                 keiko: 1.0,
                 level: 1.0,
                 milestone: 1.0,
+                status_limit: 0.0,
+                assist: 0.0,
+                route: 0.0,
             },
             dynamic: DynamicConfig::default(),
         }

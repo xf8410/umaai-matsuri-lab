@@ -65,3 +65,8 @@ train = 1.0
 keiko = 1.0
 level = 1.0
 milestone = 1.0
+# 特化上限（601）与助力の支え（401）：既有打分表漏掉的两项，缺省 0 = 不启用
+status_limit = 0.0
+assist = 0.0
+# 落位先验强度（0 = 关；足够大 = 等价于外部钉位 MATSURI_ASSIGN_PIN）
+route = 0.0

@@ -52,6 +52,11 @@ BOUNDS: dict[str, tuple[float, float, bool]] = {
     "advice.keiko": (0.2, 2.5, False),
     "advice.level": (0.2, 2.5, False),
     "advice.milestone": (0.2, 2.5, False),
+    # 轮次 7 新加的三项：前两项是打分表漏掉的 buff 效果（实测都是噪声 / 负收益，
+    # 留给 GA 自己否掉），route 是离线搜出的落位先验强度（≥200 即完全接管落位）
+    "advice.status_limit": (0.0, 4.0, False),
+    "advice.assist": (0.0, 60.0, False),
+    "advice.route": (0.0, 2000.0, False),
     "dynamic.status_catchup": (0.0, 4.0, False),
     "dynamic.act_catchup": (0.0, 2.0, False),
     "dynamic.vital_decay": (0.0, 1.0, False),
@@ -107,6 +112,9 @@ train = {g['advice.train']:.4f}
 keiko = {g['advice.keiko']:.4f}
 level = {g['advice.level']:.4f}
 milestone = {g['advice.milestone']:.4f}
+status_limit = {g['advice.status_limit']:.4f}
+assist = {g['advice.assist']:.4f}
+route = {g['advice.route']:.4f}
 
 [trainer.dynamic]
 status_catchup = {g['dynamic.status_catchup']:.4f}
@@ -213,6 +221,7 @@ def seed_genome() -> dict[str, float]:
         "weights.checkpoint": 1000.0, "weights.fat": 130.0,
         "advice.card": 1.1, "advice.npc": 0.6, "advice.train": 1.0,
         "advice.keiko": 1.3, "advice.level": 1.3, "advice.milestone": 1.1,
+        "advice.status_limit": 0.0, "advice.assist": 0.0, "advice.route": 500.0,
         "dynamic.status_catchup": 1.0, "dynamic.act_catchup": 0.0,
         "dynamic.vital_decay": 0.0, "dynamic.vital_idle": 0.0,
         "dynamic.keiko_tempo": 0.0,
@@ -239,6 +248,8 @@ def main() -> int:
     ap.add_argument("--elite", type=int, default=2)
     ap.add_argument("--rng-seed", type=int, default=20261102)
     ap.add_argument("--validate", default="", help="只评估这个覆盖层文件（留出集），不搜索")
+    ap.add_argument("--start", default="",
+                    help="起点覆盖层文件（如 lab/config/route-prior.toml）；默认用 seed_genome()")
     args = ap.parse_args()
 
     repo = Path.cwd()
@@ -265,10 +276,15 @@ def main() -> int:
     print(f"训练种子 {train[0]}–{train[-1]}（{len(train)} 个） · "
           f"留出种子 {holdout[0]}–{holdout[-1]}（{len(holdout)} 个）", flush=True)
 
-    # 基线：起点基因组（= 冠军档 d-status）在训练集上的分数，用来算 GA 到底赚了多少
-    base_g = seed_genome()
+    # 基线：起点基因组（默认 d-status，或 --start 指定的覆盖层）在训练集上的分数，
+    # 用来算 GA 到底赚了多少
+    base_label = Path(args.start).stem if args.start else "d-status"
+    if args.start:
+        base_g = parse_overlay(Path(args.start).read_text(encoding="utf8"))
+    else:
+        base_g = seed_genome()
     base_r = evaluate(base_g, repo, binary, train, args.uma, args.cards, args.pin_route)
-    print(f"基线 d-status 训练集均分 {base_r['fitness']:.1f}（n={base_r['n']}）", flush=True)
+    print(f"基线 {base_label} 训练集均分 {base_r['fitness']:.1f}（n={base_r['n']}）", flush=True)
 
     pop = [base_g] + [clamp_mutate(base_g, rng, rate=1.5) for _ in range(args.pop - 1)]
     fit: list[dict] = [None] * len(pop)  # type: ignore[list-item]
@@ -336,8 +352,13 @@ def tournament(order: list[int], fit: list[dict], rng: random.Random, k: int = 3
 
 
 def parse_overlay(text: str) -> dict[str, float]:
-    """把已有的 matsuri_config.toml 覆盖层解析回基因组（--validate 用）。"""
+    """把已有的 matsuri_config.toml 覆盖层解析回基因组（--validate/--start 用）。"""
     g = seed_genome()
+    # 轮次 7 新增的三个旋钮：文件里没写就按「未开启」处理。否则老覆盖层
+    # （ga-best.toml 没有 route 键）会继承 seed_genome 的 route=500，
+    # 等于悄悄改写旧基线，历史数字再也复现不出来。
+    for key in ("advice.status_limit", "advice.assist", "advice.route"):
+        g[key] = 0.0
     section = ""
     for line in text.splitlines():
         s = line.strip()

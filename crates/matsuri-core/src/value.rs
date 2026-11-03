@@ -42,6 +42,24 @@ const HIGH_VITAL_THRESHOLD: i32 = 70;
 /// 演目 Lv 上限（有 SSR 吾妻时可到 10）
 const ACT_LEVEL_CAP: i32 = 10;
 
+/// 离线搜索蒸馏出的教诲落位先验（`scripts/tabu_route.py` 轮次 7 的禁忌搜索路线）
+///
+/// 行 = 教诲窗口（`data.advice_windows`，turn 2/11/23/35/47/59），列 = 演目（速/耐/力/根/智），
+/// 值 = 该演目上更优的 **基础 buff id**（101 羁绊 / 201 得意率 / 301 提示 / 401 助力 / 501 体力减轻）。
+/// 用基础 id 而不是転成 id：転成 id 随 `[fusion]` 预设变，基础 id 是训练员真正在决策的东西。
+///
+/// 内化它的目的是摆脱外部钉位 `MATSURI_ASSIGN_PIN`：先验强度 `advice.route` 取足够大时
+/// 等价于硬钉位，取小值时只是打分表上的一项偏好（搜出的落位不在候选里也不会崩）。
+/// 实测出处：留出集 61900–61999 上，钉这条路线比 AI 自选 +4173.2（t=9.38，81/100）。
+pub(crate) const ROUTE_PRIOR: [[i32; 5]; 6] = [
+    [201, 101, 501, 301, 401], // T2  序盘：体力减轻挂主轴速、羁绊给耐
+    [501, 301, 101, 201, 401], // T11
+    [101, 501, 401, 301, 201], // T23
+    [101, 301, 501, 401, 201], // T35
+    [501, 101, 401, 301, 201], // T47 收尾：分身（801←501）交给担当最多的演目
+    [501, 401, 101, 301, 201], // T59
+];
+
 /// 估算上下文（构造时一次算定，避免每次动作重复遍历人头）
 struct Context {
     /// 预计剩余普通训练回合
@@ -299,7 +317,30 @@ impl<'a> Model<'a> {
             let effect = self.game.advice_effect_of(source, level);
             total += self.slot_value(&effect, act);
         }
+        total += self.route_prior_value(&effective);
         total
+    }
+
+    /// 落位先验加分：与离线搜出的 [`ROUTE_PRIOR`] 逐位比对，命中一位加 `advice.route`
+    ///
+    /// 比的是**基础 buff id**（`advice.slots[source]`），転成后的 id 不参与——
+    /// 転成 id 由 `[fusion]` 预设决定，不是训练员在这一决策点上能选的东西。
+    fn route_prior_value(&self, effective: &[u8; 5]) -> f64 {
+        if self.advice.route <= 0.0 {
+            return 0.0;
+        }
+        let Some(window) = self.game.plan.advice_window else {
+            return 0.0;
+        };
+        let Some(prior) = ROUTE_PRIOR.get(window) else {
+            return 0.0;
+        };
+        let hits = effective
+            .iter()
+            .enumerate()
+            .filter(|&(act, &source)| self.game.advice.slots[usize::from(source)] == prior[act])
+            .count();
+        hits as f64 * self.advice.route
     }
 
     // ------------------------------------------------------------------
@@ -846,6 +887,14 @@ impl<'a> Model<'a> {
         // 研钻（追加稽古；吃演目 Lv 权重）
         value +=
             f64::from(effect.kensan_rate) / 100.0 * (train + keiko) * 150.0 * self.advice.level;
+        // 特化上限（601 特別稽古）：把该演目的训练基础上限抬高 `status_limit` 点。
+        // 既有打分表**完全没算这一项**，而 601 恰是离线搜出路线里出现最多的転成 buff
+        // （满级 +25，基础上限 2200 到硬顶 2500 只有 300 余量 → 抬上限是末期稀缺资源）
+        value += f64::from(effect.status_limit) * (train + keiko) * self.advice.status_limit;
+        // 助力の支え（401）：非友情训练的保底收益，是个开关量，不按数值放大
+        if effect.support_assist {
+            value += (train + keiko) * non_friend * self.advice.assist;
+        }
         // 不屈（吃达标 / 风险权重）
         if let Some(threshold) = effect.fail_vital_threshold {
             let vital = self.game.uma().vital;

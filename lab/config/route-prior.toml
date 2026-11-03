@@ -1,0 +1,50 @@
+# 轮次 7 冠军档：GA 权重冠军（ga-best.toml）+ 离线搜索蒸馏出的教诲路线先验。
+# `route = 500.0` 打开 `ROUTE_PRIOR`（value.rs，禁忌搜索在留出集 61900–61999 上找到的路线）：
+#   命中一格 +500 分，足以压过其它打分项，等价于外部 `MATSURI_ASSIGN_PIN` 钉位。
+#   实测：route ∈ {200, 500, 2000, 1e5} 与外部钉位 100 局均分逐位相同（73810.9）。
+# `status_limit`/`assist` 是两个「打分表原本没算」的效果项，实测都不是增益来源
+#   （status_limit +306 t=0.76 噪声；assist −563 t=−3.23 显著有害），故锁 0。
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 2.3247
+rest_vital = 64
+checkpoint_margin = 5
+act_level_target = 10
+self_race = false
+friend_outing_early = true
+status_weights = [0.6465, 1.2610, 0.8387, 0.4320, 2.5988]
+
+[trainer.weights]
+vital = 1.4774
+motivation = 31.2812
+friendship = 0.5559
+hint = 0.6585
+gauge = 28.0000
+act_level = 49.9663
+checkpoint = 1182.1570
+fat = 108.4909
+
+[trainer.advice]
+card = 1.4462
+npc = 0.4246
+train = 0.2000
+keiko = 0.7630
+level = 0.2000
+milestone = 0.2000
+status_limit = 0.0000
+assist = 0.0000
+route = 500.0000
+
+[trainer.dynamic]
+status_catchup = 1.3553
+act_catchup = 0.0000
+vital_decay = 0.2019
+vital_idle = 0.0000
+keiko_tempo = 0.8532
