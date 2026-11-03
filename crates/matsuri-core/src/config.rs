@@ -25,6 +25,12 @@ const YEAR2_TARGETS: [i32; 2] = [601, 701];
 /// 第 3 年（turn 47）可用的融合对象：协助 / 不屈 / 兼修
 const YEAR3_TARGETS: [i32; 3] = [801, 901, 1001];
 
+/// `status_halve_factor` 的 serde 缺省值（0.5 = 超阈值减半）。
+/// 不能直接写 `#[serde(default = "0.5")]`，故用函数。
+fn default_halve_factor() -> f64 {
+    0.5
+}
+
 /// 剧本专属配置段
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +57,26 @@ pub struct TrainerConfig {
     pub self_race: bool,
     /// 友人外出是否尽早用完（攻略策略；false = 按收益打分）
     pub friend_outing_early: bool,
+    /// 属性收益「减半」起算的原始属性值（0 = 关闭减半，完全按非减半表打分）。
+    ///
+    /// 口径：实机里某维属性超过该值后，单次训练/稽古的**实际入账**减半、到上限截断；
+    /// 而本模拟器的 `five_status_final_score` 评分表是**非减半**的凸表（越高边际越大）。
+    /// 决策器若直接按非减半表给「已接近上限的维」打满分，就会把回合浪费在吃不满的维上
+    /// （复盘 T76：速度已贴上限仍选速度稽古，实机只入账个位数）。修正 = 决策打分时把
+    /// 预览收益先按实机口径「上限截断 + 超阈值减半」折算成有效入账，再走非减半表换算回
+    /// 评分点。阈值与上限都用模拟器的原始（非减半）坐标，无需再做面板换算。
+    #[serde(default)]
+    pub status_halve_threshold: i32,
+    /// 超阈值部分保留的比例（0.5 = 减半；1.0 = 不减半；配合 `status_halve_threshold` 用）
+    #[serde(default = "default_halve_factor")]
+    pub status_halve_factor: f64,
+    /// 友人外出截止回合（0 = 自动取 Senior 合宿窗口起点，即「第三年 10 月上」前后）。
+    /// 截止前必须把 5 段用完，越接近截止、剩余段数越多，打分越急迫。
+    #[serde(default)]
+    pub friend_outing_deadline: i32,
+    /// 友人外出截止急迫度权重（0 = 关闭急迫加分，只按段事件 + 演目收益打分）
+    #[serde(default)]
+    pub friend_outing_urgency: f64,
     /// 五维策略权重（官方评分边际之外的偏好；默认全 1）
     pub status_weights: [f64; 5],
     /// 属性 / 资源 / 事件的折算权重
@@ -119,6 +145,10 @@ pub struct ValueWeights {
     pub checkpoint: f64,
     /// 【变胖】状态的期望惩罚（一次性）
     pub fat: f64,
+    /// 友人外出每段的基础价值（演目 Lv+1 与段事件之外的「尽早用完」策略分；
+    /// 替代原先写死的 `FRIEND_OUTING_EARLY_BONUS`，可扫参）
+    #[serde(default)]
+    pub friend_outing: f64,
 }
 
 /// 教诲分配价值权重（特征系数）
@@ -349,7 +379,7 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         );
     }
     let weights = &trainer.weights;
-    let entries: [(&str, f64); 8] = [
+    let entries: [(&str, f64); 9] = [
         ("weights.vital", weights.vital),
         ("weights.motivation", weights.motivation),
         ("weights.friendship", weights.friendship),
@@ -358,6 +388,7 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         ("weights.act_level", weights.act_level),
         ("weights.checkpoint", weights.checkpoint),
         ("weights.fat", weights.fat),
+        ("weights.friend_outing", weights.friend_outing),
     ];
     for (name, value) in entries {
         ensure!(
@@ -365,6 +396,22 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
             "trainer.{name} 应为非负有限数"
         );
     }
+    ensure!(
+        (0..=4000).contains(&trainer.status_halve_threshold),
+        "trainer.status_halve_threshold 应在 0–4000（0 = 关闭减半）"
+    );
+    ensure!(
+        trainer.status_halve_factor.is_finite() && (0.0..=1.0).contains(&trainer.status_halve_factor),
+        "trainer.status_halve_factor 应在 0–1（0.5 = 超阈值减半）"
+    );
+    ensure!(
+        (0..=77).contains(&trainer.friend_outing_deadline),
+        "trainer.friend_outing_deadline 应在 0–77（0 = 自动取 Senior 合宿起点）"
+    );
+    ensure!(
+        trainer.friend_outing_urgency.is_finite() && trainer.friend_outing_urgency >= 0.0,
+        "trainer.friend_outing_urgency 应为非负有限数"
+    );
     let advice = &trainer.advice;
     let entries: [(&str, f64); 9] = [
         ("advice.card", advice.card),
@@ -445,6 +492,10 @@ impl Default for TrainerConfig {
             act_level_target: 8,
             self_race: false,
             friend_outing_early: true,
+            status_halve_threshold: 0,
+            status_halve_factor: 0.5,
+            friend_outing_deadline: 0,
+            friend_outing_urgency: 0.0,
             status_weights: [1.0; 5],
             weights: ValueWeights {
                 vital: 1.2,
@@ -455,6 +506,7 @@ impl Default for TrainerConfig {
                 act_level: 120.0,
                 checkpoint: 800.0,
                 fat: 120.0,
+                friend_outing: 120.0,
             },
             advice: AdviceWeights {
                 card: 1.0,

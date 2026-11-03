@@ -1,23 +1,37 @@
 """遗传算法迭代 trainer 权重（骏大祭）。
 
-为什么现在能上 GA：单局 0.15s，100 局 12s，所以「一代 16 个个体 × 24 个种子」只要 1 分钟，
-GA 完全跑在本地。仓库 CI 的 100 局硬上限不受影响——GA 只用训练种子集搜索，
-搜完的冠军再用完整 100 局（含留出集）在 CI 上做一次正式记录，避免用调参种子自证。
-
 搜索空间 = `lab/config/d-status.toml` 的 `[trainer]` 全部数值旋钮（含 5 个 dynamic），
-`[fusion]` 暂时固定（120 种组合是另一个离散问题，先不掺进连续搜索里）。
+`[fusion]` 暂时固定（120 种组合是另一个离散问题，见 scripts/fusion_ucb.py）。
 
-防过拟合：训练种子 61444–61477（24 个），留出种子 61544–61643（100 个）只在最后评一次。
-两者都是 CRN（同一批种子跑所有个体），所以个体之间的差是配对差，种子主效应被消掉。
+协议照搬旧仓库 xf8410/umaai-rs 的 `crates/umasim/src/genetic_optimizer.rs`
+（GaParams 定稿值 + 44 代实测记录），我原来那版是简化到失真的：
+
+| 项 | 旧版（我） | 现在（照旧仓库） |
+|---|---|---|
+| 种群 / 代数 | 16 / 12 | 24 / 40（旧仓库 pop 60 / gens 40，CI 传 50 / 100） |
+| σ 变异步长 | 全程写死 0.12 | 0.15 → 0.03 线性衰减，停滞 5 代回升一次 |
+| 评估 | 单级，所有个体同一批种子 | 两级：初筛 12 局 → 前 6 名晋升精评 40 局 |
+| 精英 / 锦标赛 / 交叉 | 2 / k=3 / 0.7 | 4 / k=3 / 0.9 |
+| 缓存 | 无 | (基因组指纹, 级别) 命中即免跑 |
+| 过拟合哨兵 | 只在最后看一次 gap | 每代冠军跑留出集 12 局，gap 逐代落盘 |
+| 入榜口径 | 末代最优 | 全程**精评**最优（初筛值不入榜） |
+
+旧仓库 ga_generations.csv 显示收益在 44 代之后仍在涨（gen44 68179 → gen52 68253
+全局最优），所以「连续权重空间已经饱和」那个结论是 12 代跑出来的，不成立。
+
+防过拟合：精评种子（--start-seed 起 40 个）只用于选择，留出种子
+（--holdout-seed 起 100 个）只在最后评一次并做配对 t。两者都是 CRN
+（同一批种子跑所有个体），所以个体之间的差是配对差，种子主效应被消掉。
 
 用法：
-    python3 scripts/ga.py --pop 16 --gens 12 --seeds 24 --out artifacts/ga
+    python3 scripts/ga.py --pop 24 --gens 40 --out artifacts/ga
     python3 scripts/ga.py --validate lab/config/ga-best.toml   # 留出集正式评估
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -194,14 +208,15 @@ def evaluate(g: dict[str, float], repo: Path, binary: Path, seeds: list[int],
     }
 
 
-def clamp_mutate(g: dict[str, float], rng: random.Random, rate: float = 1.0) -> dict[str, float]:
+def clamp_mutate(g: dict[str, float], rng: random.Random, sigma: float = SIGMA) -> dict[str, float]:
+    """高斯变异：每个基因独立以 1/基因数 概率触发（旧仓库 genetic_optimizer.rs 的 pm 口径），
+    步长 sigma × 量程。sigma 由主循环按代调度（0.15 → 0.03，停滞回升），不再写死。"""
     child = dict(g)
-    # 每个基因独立以 rate/len 概率变异，保证平均改动 1–2 个旋钮（单变量可归因）
-    per = max(rate / len(BOUNDS), 0.02)
+    per = 1.0 / len(BOUNDS)
     for key, (lo, hi, is_int) in BOUNDS.items():
-        if rng.random() < per * 4:
+        if rng.random() < per:
             span = hi - lo
-            child[key] = min(hi, max(lo, child[key] + rng.gauss(0.0, SIGMA * span)))
+            child[key] = min(hi, max(lo, child[key] + rng.gauss(0.0, sigma * span)))
             if is_int:
                 child[key] = float(round(child[key]))
     return child
@@ -209,6 +224,25 @@ def clamp_mutate(g: dict[str, float], rng: random.Random, rate: float = 1.0) -> 
 
 def crossover(a: dict[str, float], b: dict[str, float], rng: random.Random) -> dict[str, float]:
     return {k: (a[k] if rng.random() < 0.5 else b[k]) for k in BOUNDS}
+
+
+def genome_hash(g: dict[str, float]) -> str:
+    """基因组指纹：评估缓存键。精英跨代原样保留、变异偶尔撞回同一个体时，
+    不必重跑同一批种子（旧仓库 genetic_optimizer.rs::genome_hash 的同一动机）。"""
+    return hashlib.blake2b(
+        json.dumps({k: round(g[k], 6) for k in BOUNDS}, sort_keys=True).encode(),
+        digest_size=8).hexdigest()
+
+
+def sigma_for_gen(gen: int, gens: int, sigma0: float, sigma_min: float,
+                  reset: bool) -> float:
+    """σ 调度：停滞代回升到 sigma0，否则按代线性衰减到 sigma_min。
+    照抄旧仓库 GaOptimizer::sigma_for_gen —— 我原来的版本 σ 全程写死 0.12，
+    前期不够大跳不出盆地、后期又太大收敛不住。"""
+    if reset or gens <= 1:
+        return sigma0
+    t = gen / (gens - 1)
+    return sigma0 - (sigma0 - sigma_min) * t
 
 
 def seed_genome() -> dict[str, float]:
@@ -233,9 +267,13 @@ def seed_genome() -> dict[str, float]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pop", type=int, default=16)
-    ap.add_argument("--gens", type=int, default=12)
-    ap.add_argument("--seeds", type=int, default=24, help="训练种子数（从 --start-seed 起）")
+    ap.add_argument("--pop", type=int, default=24)
+    ap.add_argument("--gens", type=int, default=40)
+    ap.add_argument("--seeds", type=int, default=40, help="精评种子数（从 --start-seed 起）")
+    ap.add_argument("--screen-seeds", type=int, default=12,
+                    help="初筛种子数（精评种子集的前 N 个，CRN 子集）")
+    ap.add_argument("--promote", type=int, default=6,
+                    help="每代按初筛值晋升精评的名额（旧仓库 = elitism）")
     ap.add_argument("--start-seed", type=int, default=61444)
     ap.add_argument("--holdout-seed", type=int, default=61544)
     ap.add_argument("--holdout-count", type=int, default=100)
@@ -245,7 +283,13 @@ def main() -> int:
                     help="钉住教示路线（原样传 MATSURI_ASSIGN_PIN）；GA 只搜权重，路线固定")
     ap.add_argument("--binary", default="target/release/matsuri")
     ap.add_argument("--out", default="artifacts/ga")
-    ap.add_argument("--elite", type=int, default=2)
+    ap.add_argument("--elite", type=int, default=4, help="精英保留数")
+    ap.add_argument("--tournament-k", type=int, default=3)
+    ap.add_argument("--cx-rate", type=float, default=0.9, help="均匀交叉率")
+    ap.add_argument("--sigma0", type=float, default=0.15, help="高斯变异 σ 初值（×量程）")
+    ap.add_argument("--sigma-min", type=float, default=0.03, help="σ 下界")
+    ap.add_argument("--stagnation-gens", type=int, default=5,
+                    help="连续 N 代精评最优无提升 → σ 回升一次")
     ap.add_argument("--rng-seed", type=int, default=20261102)
     ap.add_argument("--validate", default="", help="只评估这个覆盖层文件（留出集），不搜索")
     ap.add_argument("--start", default="",
@@ -271,10 +315,29 @@ def main() -> int:
                          ensure_ascii=False, indent=2))
         return 0
 
-    train = [args.start_seed + i for i in range(args.seeds)]
+    full_seeds = [args.start_seed + i for i in range(args.seeds)]
+    screen_seeds = full_seeds[:args.screen_seeds]
     holdout = [args.holdout_seed + i for i in range(args.holdout_count)]
-    print(f"训练种子 {train[0]}–{train[-1]}（{len(train)} 个） · "
+    print(f"初筛种子 {screen_seeds[0]}–{screen_seeds[-1]}（{len(screen_seeds)} 个） · "
+          f"精评种子 {full_seeds[0]}–{full_seeds[-1]}（{len(full_seeds)} 个） · "
           f"留出种子 {holdout[0]}–{holdout[-1]}（{len(holdout)} 个）", flush=True)
+
+    # 评估缓存：键 = (基因组指纹, 级别)。精英跨代原样保留，命中即免跑。
+    cache: dict[tuple[str, str], dict] = {}
+    stats = {"screen": 0, "full": 0, "hits": 0, "games": 0}
+
+    def ev(g: dict[str, float], level: str) -> dict:
+        seeds = screen_seeds if level == "s" else full_seeds
+        key = (genome_hash(g), level)
+        hit = cache.get(key)
+        if hit is not None:
+            stats["hits"] += 1
+            return hit
+        r = evaluate(g, repo, binary, seeds, args.uma, args.cards, args.pin_route)
+        cache[key] = r
+        stats["full" if level == "f" else "screen"] += 1
+        stats["games"] += len(seeds)
+        return r
 
     # 基线：起点基因组（默认 d-status，或 --start 指定的覆盖层）在训练集上的分数，
     # 用来算 GA 到底赚了多少
@@ -283,50 +346,103 @@ def main() -> int:
         base_g = parse_overlay(Path(args.start).read_text(encoding="utf8"))
     else:
         base_g = seed_genome()
-    base_r = evaluate(base_g, repo, binary, train, args.uma, args.cards, args.pin_route)
-    print(f"基线 {base_label} 训练集均分 {base_r['fitness']:.1f}（n={base_r['n']}）", flush=True)
+    base_r = ev(base_g, "f")
+    print(f"基线 {base_label} 精评均分 {base_r['fitness']:.1f}（n={base_r['n']}）", flush=True)
 
-    pop = [base_g] + [clamp_mutate(base_g, rng, rate=1.5) for _ in range(args.pop - 1)]
-    fit: list[dict] = [None] * len(pop)  # type: ignore[list-item]
+    # 个体 = 基因组 + 两级评估位（None = 尚未评）。display 优先精评值，
+    # 与旧仓库 Individual::display_fitness 同口径：跨代可比的只有精评值。
+    pop: list[dict] = [{"g": base_g, "s": None, "f": None}]
+    while len(pop) < args.pop:
+        pop.append({"g": clamp_mutate(base_g, rng, args.sigma0), "s": None, "f": None})
+
+    def display(ind: dict) -> float:
+        r = ind["f"] or ind["s"]
+        return r["fitness"] if r else float("-inf")
+
     history = []
+    best_f: tuple[float, dict] | None = None   # 全程精评最优（跨代入榜）
+    stagnation = 0
+    resets = 0
     t0 = time.time()
     for gen in range(args.gens):
-        for i, g in enumerate(pop):
-            if fit[i] is None:
-                fit[i] = evaluate(g, repo, binary, train, args.uma, args.cards, args.pin_route)
-        order = sorted(range(len(pop)), key=lambda i: -fit[i]["fitness"])
-        best = fit[order[0]]
-        history.append({"gen": gen, "best": round(best["fitness"], 1),
-                        "mean": round(sum(fit[i]["fitness"] for i in range(len(pop))) / len(pop), 1),
-                        "base": round(base_r["fitness"], 1)})
-        print(f"gen {gen:>2} best {best['fitness']:.1f} "
-              f"(Δ{best['fitness'] - base_r['fitness']:+.1f}) "
-              f"mean {history[-1]['mean']:.1f} · {time.time() - t0:.0f}s", flush=True)
+        sigma = sigma_for_gen(gen, args.gens, args.sigma0, args.sigma_min,
+                              stagnation >= args.stagnation_gens)
+        if stagnation >= args.stagnation_gens:
+            stagnation = 0
+            resets += 1
+        prev_best = best_f[0] if best_f else None
+
+        # 1) 初筛：尚无任何评估值的个体全部过初筛
+        for ind in pop:
+            if ind["s"] is None and ind["f"] is None:
+                ind["s"] = ev(ind["g"], "s")
+
+        # 2) 精评晋升：按当前值取前 --promote 名补精评（随机 tie-break 保序，
+        #    避免 sort 比较器违反全序——旧仓库在这里踩过 Rust panic 的坑）
+        tb = [rng.random() for _ in pop]
+        order = sorted(range(len(pop)), key=lambda i: (-display(pop[i]), -tb[i], i))
+        for i in order[:max(1, min(args.promote, len(pop)))]:
+            if pop[i]["f"] is None:
+                pop[i]["f"] = ev(pop[i]["g"], "f")
+
+        # 3) 排序刷新：精评优先，确定性 tie-break（基因组指纹小者优先）
+        order = sorted(range(len(pop)),
+                       key=lambda i: (-display(pop[i]), genome_hash(pop[i]["g"])))
+        champ = pop[order[0]]
+        if champ["f"] is not None and (best_f is None or champ["f"]["fitness"] > best_f[0]):
+            best_f = (champ["f"]["fitness"], champ["g"])
+        improved = best_f is not None and (prev_best is None or best_f[0] > prev_best + 1e-9)
+        stagnation = 0 if improved else stagnation + 1
+
+        # 4) 过拟合哨兵：本代冠军的留出集小样（12 局）−精评值。不参与选择。
+        champ_h = evaluate(champ["g"], repo, binary, holdout[:args.screen_seeds],
+                           args.uma, args.cards, args.pin_route)
+        gap = (champ["f"]["fitness"] - champ_h["fitness"]) if champ["f"] else None
+        history.append({
+            "gen": gen, "sigma": round(sigma, 4),
+            "best_screen": round(display(champ), 1),
+            "best_full": round(champ["f"]["fitness"], 1) if champ["f"] else None,
+            "global_best_full": round(best_f[0], 1) if best_f else None,
+            "mean": round(sum(display(pop[i]) for i in range(len(pop))) / len(pop), 1),
+            "full_count": sum(1 for i in pop if i["f"] is not None),
+            "stagnation": stagnation, "resets": resets,
+            "holdout12": round(champ_h["fitness"], 1),
+            "overfit_gap": round(gap, 1) if gap is not None else None,
+            "cache_hits": stats["hits"], "games": stats["games"],
+            "base": round(base_r["fitness"], 1), "elapsed_s": round(time.time() - t0),
+        })
+        print(f"gen {gen:>2} σ{sigma:.3f} best "
+              f"{history[-1]['best_full'] if champ['f'] else history[-1]['best_screen']} "
+              f"(全局 {history[-1]['global_best_full']}) "
+              f"h12 {history[-1]['holdout12']} gap {history[-1]['overfit_gap']} "
+              f"停滞{stagnation}/{args.stagnation_gens} 局{stats['games']} "
+              f"· {time.time() - t0:.0f}s", flush=True)
         (out / "history.json").write_text(
             json.dumps(history, ensure_ascii=False, indent=2), encoding="utf8")
         if gen == args.gens - 1:
             break
-        # 精英保留 + 锦标赛选择 + 交叉/变异
-        new_pop = [pop[i] for i in order[:args.elite]]
-        new_fit: list[dict] = [fit[i] for i in order[:args.elite]]
-        while len(new_pop) < args.pop:
-            a, b = (pop[tournament(order, fit, rng)] for _ in range(2))
-            child = crossover(a, b, rng) if rng.random() < 0.7 else dict(a)
-            child = clamp_mutate(child, rng, rate=1.0 if rng.random() < 0.7 else 3.0)
-            new_pop.append(child)
-            new_fit.append(None)  # type: ignore[arg-type]
-        pop, fit = new_pop, new_fit
 
-    order = sorted(range(len(pop)), key=lambda i: -fit[i]["fitness"])
-    champion = pop[order[0]]
-    champ_r = fit[order[0]]
+        # 5) 繁殖：精英直接保留（带评估位，跨代命中缓存），其余锦标赛 + 均匀交叉 + 高斯变异
+        new_pop = [pop[i] for i in order[:min(args.elite, len(pop))]]
+        while len(new_pop) < args.pop:
+            a = pop[tournament(order, pop, rng, args.tournament_k)]["g"]
+            b = pop[tournament(order, pop, rng, args.tournament_k)]["g"]
+            child = crossover(a, b, rng) if rng.random() < args.cx_rate else dict(a)
+            new_pop.append({"g": clamp_mutate(child, rng, sigma), "s": None, "f": None})
+        pop = new_pop
+
+    # 全程精评最优（不是末代最优——末代可能只是初筛值高）
+    champion = best_f[1]
+    champ_r = cache[(genome_hash(champion), "f")]
     (out / "best.toml").write_text(genome_to_toml(champion), encoding="utf8")
     (out / "best.json").write_text(json.dumps(
         {"genome": champion, "train": {k: v for k, v in champ_r.items() if k != "scores"},
-         "baseline_train": {k: v for k, v in base_r.items() if k != "scores"}},
+         "baseline_train": {k: v for k, v in base_r.items() if k != "scores"},
+         "budget": stats, "stagnation_resets": resets},
         ensure_ascii=False, indent=2), encoding="utf8")
-    print(f"\n冠军训练集 {champ_r['fitness']:.1f}（基线 {base_r['fitness']:.1f}，"
-          f"Δ{champ_r['fitness'] - base_r['fitness']:+.1f}）", flush=True)
+    print(f"\n冠军精评 {champ_r['fitness']:.1f}（基线 {base_r['fitness']:.1f}，"
+          f"Δ{champ_r['fitness'] - base_r['fitness']:+.1f}）· 共 {stats['games']} 局"
+          f"（缓存命中 {stats['hits']}）", flush=True)
 
     # 留出集：训练种子一个都没参与过，这才是「GA 有没有真本事」的判据
     print("留出集评估冠军 …", flush=True)
@@ -346,9 +462,10 @@ def main() -> int:
     return 0
 
 
-def tournament(order: list[int], fit: list[dict], rng: random.Random, k: int = 3) -> int:
+def tournament(order: list[int], pop: list[dict], rng: random.Random, k: int = 3) -> int:
+    """锦标赛选择：从已排好的 order 里随机抽 k 个，取适应度最高者。"""
     cands = rng.sample(order, min(k, len(order)))
-    return max(cands, key=lambda i: fit[i]["fitness"])
+    return max(cands, key=lambda i: (pop[i]["f"] or pop[i]["s"])["fitness"])
 
 
 def parse_overlay(text: str) -> dict[str, float]:

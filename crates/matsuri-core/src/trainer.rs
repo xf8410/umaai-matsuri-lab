@@ -216,20 +216,28 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
             }
         }
 
-        // 守门 ③：友人外出截止线（剩余次数 ≥ 剩余可用回合 → 强制友人外出）
+        // 守门 ③：友人外出截止线（截止回合前必须把剩余段用完，否则强制友人外出）
+        //
+        // 截止回合 = `friend_outing_deadline`（0 = Senior 合宿起点 ≈ 第三年 10 月上）。
+        // 估算截止前可用回合时排除约 18% 的比赛 / 强制回合；剩余段数 > 可用回合即提速。
         if let Some(index) = actions
             .iter()
             .position(|action| *action == Action::FriendOuting)
         {
             let remaining_uses = game.friend.out_used.iter().filter(|used| !**used).count();
-            let remaining_turns = (game.max_turn() - game.turn()).max(0) as usize;
-            // 比赛回合不可出行，估算可用回合（排除约 18% 比赛/强制回合）
-            let usable_turns = (remaining_turns as f64 * 0.82) as usize;
-            if remaining_uses > 0 && remaining_uses >= usable_turns {
+            let deadline = if self.config.trainer.friend_outing_deadline > 0 {
+                self.config.trainer.friend_outing_deadline
+            } else {
+                game.data.camp.windows.get(2).map_or(60, |window| window.start)
+            };
+            let turns_to_deadline = (deadline - game.turn()).max(0) as usize;
+            let usable_turns = (turns_to_deadline as f64 * 0.82) as usize;
+            if remaining_uses > 0 && remaining_uses > usable_turns {
                 diag!(
-                    "【决策】T{} 守门·友人外出截止（剩{}次/可用{}回合）",
+                    "【决策】T{} 守门·友人外出截止（剩{}段/截止T{}前可用{}回合）",
                     game.turn(),
                     remaining_uses,
+                    deadline,
                     usable_turns
                 );
                 return Ok(index);

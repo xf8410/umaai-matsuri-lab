@@ -27,8 +27,6 @@ const SHINING_BONUS: f64 = 15.0;
 const KENSAN_TRIGGER_BONUS: f64 = 200.0;
 /// 多亮起囤积的惩罚（亮起会锁人、降低其他位置期望人头）
 const LIT_HOARD_PENALTY: f64 = 60.0;
-/// 友人外出「尽早用完」策略的加分
-const FRIEND_OUTING_EARLY_BONUS: f64 = 120.0;
 /// 治病的保底价值（生病 / 不擅长时）
 const CLINIC_VALUE: f64 = 400.0;
 /// 非变胖病位的惩罚
@@ -423,7 +421,15 @@ impl<'a> Model<'a> {
         value
     }
 
-    /// 友人出行估值（段事件期望 + 最低演目 Lv+1 + 槽 +1；攻略「尽早用完」加分）
+    /// 友人出行估值（段事件期望 + 最低演目 Lv+1 + 槽 +1 + 尽早用完权重 + 截止急迫 + 逐回合推敲）
+    ///
+    /// 「尽早用完」不再是一个写死的常量加分，而是三块可调的打分：
+    /// ① `weights.friend_outing`：每段基础策略分（替代 `FRIEND_OUTING_EARLY_BONUS`）；
+    /// ② 截止急迫：`friend_outing_deadline`（默认 Senior 合宿起点 ≈ 第三年 10 月上）前
+    ///    必须用完 5 段，剩余段越多 / 越接近截止，急迫分越高；
+    /// ③ 逐回合推敲：体力平滑带（训练贵但能练 → 外出回体力 + 演目 Lv 平滑过渡）与
+    ///    满体力（休息 / 普通出行吃闲置惩罚 → 外出是更优的花回合方式）。
+    /// 粉丝达标不建模（本项目不处理粉丝机制），故不参与此处打分。
     fn friend_outing_value(&self) -> f64 {
         if self.game.friend_outing_add_level().is_none() {
             return f64::NEG_INFINITY;
@@ -436,6 +442,7 @@ impl<'a> Model<'a> {
             .position(|used| !*used)
             .map(|index| index + 1)
             .unwrap_or(1);
+        let remaining_uses = (self.game.friend.out_used.len() - step + 1).max(1);
         let expected = Data::get()
             .ok()
             .and_then(|data| data.events.friend_events.get(&step.to_string()).cloned())
@@ -448,9 +455,49 @@ impl<'a> Model<'a> {
             .unwrap_or(50.0);
         let mut value = expected + self.resource_value(&Action::FriendOuting);
         if self.cfg.friend_outing_early {
-            value += FRIEND_OUTING_EARLY_BONUS;
+            value += self.weights.friend_outing;
         }
+        value += self.friend_outing_urgency_value(remaining_uses);
+        value += self.friend_outing_deliberation_value();
         value
+    }
+
+    /// 友人外出截止回合：配置显式值优先，否则取 Senior 合宿窗口（index 2）起点
+    /// （骏大祭 Senior 合宿 ≈ 第三年 10 月，即「10 月上之前必须用完」的截止点）。
+    fn friend_outing_deadline_turn(&self) -> i32 {
+        if self.cfg.friend_outing_deadline > 0 {
+            return self.cfg.friend_outing_deadline;
+        }
+        self.game.data.camp.windows.get(2).map_or(60, |window| window.start)
+    }
+
+    /// 截止急迫分：剩余段数相对剩余回合越「拥挤」、越接近截止，分越高。
+    /// `friend_outing_urgency = 0` 时关闭（退化为只按段事件 + 演目收益打分）。
+    fn friend_outing_urgency_value(&self, remaining_uses: usize) -> f64 {
+        if self.cfg.friend_outing_urgency <= 0.0 || remaining_uses == 0 {
+            return 0.0;
+        }
+        let turns_left = f64::from((self.friend_outing_deadline_turn() - self.game.turn()).max(0));
+        // 拥挤度：剩余段 / 剩余回合（>1 = 按当前节奏用不完，必须提速）
+        let crowding = remaining_uses as f64 / turns_left.max(1.0);
+        // 接近截止的线性抬升（截止前 20 回合内 0 → 1）
+        let proximity = ((20.0 - turns_left) / 20.0).clamp(0.0, 1.0);
+        self.cfg.friend_outing_urgency * (crowding + proximity)
+    }
+
+    /// 逐回合推敲的体力带调制（在段事件 / 演目收益之外的边际偏好）：
+    /// ① 平滑带（`rest_vital`..70）：训练能练但每次掉体力，外出既回体力又升演目，平滑过渡；
+    /// ② 满体力（≥70）：休息 / 普通出行吃 `idle_penalty`，外出是更优的「花掉这回合」。
+    /// 体力过低（<`rest_vital`）时休息更直接回体力，此处不加偏好，交给打分表对比。
+    fn friend_outing_deliberation_value(&self) -> f64 {
+        let vital = self.game.uma().vital;
+        if vital >= HIGH_VITAL_THRESHOLD {
+            self.weights.friend_outing * 0.5
+        } else if vital >= self.cfg.rest_vital {
+            self.weights.friend_outing * 0.3
+        } else {
+            0.0
+        }
     }
 
     /// 比赛估值（强制比赛回合给保底；自选比赛受 `self_race` 开关控制）
@@ -536,6 +583,11 @@ impl<'a> Model<'a> {
     }
 
     /// 五维增量评分（含策略权重 `status_weights`）
+    ///
+    /// 实机口径修正：预览收益先按「上限截断 + 超 `status_halve_threshold` 减半」折算成
+    /// **有效入账**，再走非减半的 `five_status_final_score` 凸表换算回评分点。
+    /// 这样「已贴上限的维」边际趋零，决策不会再把回合浪费在吃不满的维上（复盘 T76）。
+    /// `status_halve_threshold = 0` 时退化为原行为（直接按非减半表打满）。
     fn status_gain(&self, gains: &[i32; 5]) -> f64 {
         let uma = self.game.uma();
         let mut total = 0.0;
@@ -544,12 +596,39 @@ impl<'a> Model<'a> {
                 continue;
             }
             let current = uma.five_status[axis];
-            let after = (current + *gain).min(uma.five_status_limit[axis]);
+            let effective = self.effective_status_gain(axis, current, *gain);
+            if effective == 0 {
+                continue;
+            }
+            let after = (current + effective).min(uma.five_status_limit[axis]);
             total += (self.status_score(axis, after) - self.status_score(axis, current))
                 * self.status_weights[axis]
                 * self.ctx.dyn_status[axis];
         }
         total
+    }
+
+    /// 单维「有效入账」：上限截断 + 超阈值部分按 `status_halve_factor` 保留。
+    ///
+    /// 阈值与上限都用模拟器的原始（非减半）坐标——实机减半的是**入账**不是面板数值，
+    /// 所以无需对阈值做面板换算（`status_halve_threshold = 0` = 关闭，返回截断后的原值）。
+    fn effective_status_gain(&self, axis: usize, current: i32, gain: i32) -> i32 {
+        let limit = self.game.uma().five_status_limit[axis];
+        let capped = ((current + gain).min(limit) - current).max(0);
+        if capped == 0 || self.cfg.status_halve_threshold <= 0 {
+            return capped;
+        }
+        let threshold = self.cfg.status_halve_threshold;
+        let factor = self.cfg.status_halve_factor.clamp(0.0, 1.0);
+        if current >= threshold {
+            // 整段入账都在阈值之上 → 全部按比例保留
+            (f64::from(capped) * factor).round() as i32
+        } else {
+            // 跨阈值：阈值以下全额、以上按比例
+            let full = (threshold - current).min(capped);
+            let over = capped - full;
+            full + (f64::from(over) * factor).round() as i32
+        }
     }
 
     /// 单轴增量评分（含策略权重）
@@ -1063,5 +1142,77 @@ mod tests {
             0.0,
             "到上限后边际为 0"
         );
+    }
+
+    /// 属性减半：超阈值入账按比例保留，已贴上限的维边际趋零（复盘 T76 的修正）
+    #[test]
+    fn status_halving_dampens_high_axis_gain() {
+        let mut game = sample_game();
+        let limit = game.uma().five_status_limit[0];
+        game.uma_mut().five_status[0] = limit - 20;
+
+        // 打开减半：阈值 1200、保留 0.5 → 预览 +200 只剩 20 余量且全在阈值上 → 有效入账 10
+        game.config.trainer.status_halve_threshold = 1200;
+        game.config.trainer.status_halve_factor = 0.5;
+        let (halved_eff, halved_score) = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            (
+                model.effective_status_gain(0, limit - 20, 200),
+                model.status_gain(&[200, 0, 0, 0, 0]),
+            )
+        };
+        assert_eq!(halved_eff, 10);
+
+        // 关闭减半（阈值 0）→ 有效入账 = 余量 20，评分应更高
+        game.config.trainer.status_halve_threshold = 0;
+        let (full_eff, full_score) = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            (
+                model.effective_status_gain(0, limit - 20, 200),
+                model.status_gain(&[200, 0, 0, 0, 0]),
+            )
+        };
+        assert_eq!(full_eff, 20);
+        assert!(
+            halved_score < full_score,
+            "减半后贴上限维的边际评分应低于非减半（{halved_score} < {full_score}）"
+        );
+
+        // 跨阈值：阈值下全额、以上减半（+300 → 1100..1200 全额 100，1200..1400 减半 100 → 200）
+        game.config.trainer.status_halve_threshold = 1200;
+        game.uma_mut().five_status[0] = 1100;
+        let cross_eff = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.effective_status_gain(0, 1100, 300)
+        };
+        assert_eq!(cross_eff, 200);
+    }
+
+    /// 友人外出：截止急迫随「剩余段 / 剩余回合」拥挤度与接近截止而抬升
+    #[test]
+    fn friend_outing_urgency_ramps_near_deadline() {
+        let mut game = sample_game();
+        game.config.trainer.friend_outing_urgency = 100.0;
+        game.config.trainer.friend_outing_deadline = 60;
+        // 解锁友人、5 段全未用
+        game.base.friend.card_id = Some(303999);
+        game.base.friend.out_used = vec![false; 5];
+        // 远未截止（T10）：急迫低
+        game.turn = 10;
+        let early_urgency = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.friend_outing_urgency_value(5)
+        };
+        // 接近截止（T58，剩 2 回合、5 段未用 → 拥挤度 2.5）：急迫高
+        game.turn = 58;
+        let late_urgency = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.friend_outing_urgency_value(5)
+        };
+        assert!(
+            late_urgency > early_urgency,
+            "越接近截止、剩余段越多，急迫分越高（{late_urgency} > {early_urgency}）"
+        );
+        assert!(late_urgency > 0.0);
     }
 }
