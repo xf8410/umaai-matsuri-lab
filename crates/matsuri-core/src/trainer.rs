@@ -33,6 +33,23 @@ pub struct MatsuriTrainer {
     search: Option<SearchConfig>,
     /// 教诲分配候选的剪枝宽度（24 个互异落位全搜太贵，只搜手写打分最高的前 K 个）
     search_topk: usize,
+    /// 合宿训练回合的前瞻搜索配置（攻略优化点 3：夏合宿 4 轮组合前瞻）
+    ///
+    /// `None` = 合宿回合仍走守门②的逐回合贪心 `action_value`。开启后，合宿训练回合
+    /// 改用引擎 `FlatSearch` 对候选训练做蒙特卡洛前瞻（rollout 到终局），让「这一轮练什么」
+    /// 把后续合宿轮 / 全局收益一并计入，而非只看当回合。rollout 基策同样 `None`（防递归）。
+    camp_search: Option<SearchConfig>,
+    /// 合宿前瞻的候选剪枝宽度（按贪心 `action_value` 排序后只搜前 K 个训练位）
+    camp_search_topk: usize,
+    /// 常规（非合宿 / 非教诲）回合的前瞻搜索配置（攻略优化点 1）
+    ///
+    /// `None` = 常规回合走守门链后的逐回合贪心打分表。开启后，对通过守门链的自由决策回合
+    /// 用 `FlatSearch` MC rollout 到终局择优——让「这回合练不练当前（可能很差的）稽古」把
+    /// **下一回合稽古 lineup 重新洗牌**后的期望收益一并计入，而非只看当回合贪心分。
+    /// rollout 基策同样 `None`（防递归）。常规回合多（~65/局），成本高于合宿前瞻。
+    normal_search: Option<SearchConfig>,
+    /// 常规前瞻的候选剪枝宽度（按贪心 `action_value` 排序后只搜前 K 个动作）
+    normal_search_topk: usize,
 }
 
 impl MatsuriTrainer {
@@ -42,6 +59,10 @@ impl MatsuriTrainer {
             config,
             search: None,
             search_topk: 4,
+            camp_search: None,
+            camp_search_topk: 4,
+            normal_search: None,
+            normal_search_topk: 4,
         }
     }
 
@@ -50,6 +71,22 @@ impl MatsuriTrainer {
     pub fn with_search(mut self, search: SearchConfig, topk: usize) -> Self {
         self.search = (search.search_n > 0).then_some(search);
         self.search_topk = topk.max(1);
+        self
+    }
+
+    /// 打开合宿训练回合的前瞻蒙特卡洛搜索（攻略优化点 3；`search_n = 0` 视为关闭）
+    #[must_use]
+    pub fn with_camp_search(mut self, search: SearchConfig, topk: usize) -> Self {
+        self.camp_search = (search.search_n > 0).then_some(search);
+        self.camp_search_topk = topk.max(1);
+        self
+    }
+
+    /// 打开常规回合的前瞻蒙特卡洛搜索（攻略优化点 1：稽古洗牌前瞻；`search_n = 0` 视为关闭）
+    #[must_use]
+    pub fn with_normal_search(mut self, search: SearchConfig, topk: usize) -> Self {
+        self.normal_search = (search.search_n > 0).then_some(search);
+        self.normal_search_topk = topk.max(1);
         self
     }
 
@@ -113,6 +150,75 @@ impl MatsuriTrainer {
             value
         );
         Ok(Some((scored[best].1, value)))
+    }
+
+    /// 蒙特卡洛前瞻择优的公共内核（教诲 / 合宿 / 常规三处共用）：引擎 `FlatSearch` 对
+    /// 手写贪心排序后的前 `topk` 个候选各跑 `search.search_n` 次 rollout 到终局，中选口径
+    /// 换成搜索到的终局期望（`radical_factor` 按剩余回合衰减）。rollout 基策 = 同一份配置的
+    /// 手写训练员且**不开任何搜索**（防递归）。返回 `None` = 剪枝后不足 2 个候选，退回贪心。
+    fn mc_pick(
+        &self,
+        game: &MatsuriGame,
+        actions: &[Action],
+        scored: &[(f64, usize)],
+        search: &SearchConfig,
+        topk: usize,
+        label: &str,
+    ) -> Result<Option<(usize, f64)>> {
+        let cand: Vec<Action> = scored
+            .iter()
+            .take(topk)
+            .map(|&(_, index)| actions[index].clone())
+            .collect();
+        if cand.len() < 2 {
+            return Ok(None);
+        }
+        let searcher = FlatSearch::<MatsuriGame>::new(search.clone())
+            .with_rollout_trainer(MatsuriTrainer::new(self.config.clone()))
+            .with_parallel(true);
+        let mut rng = StdRng::seed_from_u64(
+            game.rule_master().unwrap_or(0) ^ (game.turn().max(0) as u64) << 40,
+        );
+        let (best, value) = {
+            let _quiet = umaai_core::diag::DiagGuard::suppress();
+            let out = searcher.search::<NoTerminal, _>(game, &cand, &mut rng, |_| NoTerminal)?;
+            (
+                out.best_action_idx,
+                out.action_results[out.best_action_idx].weighted_mean(out.radical_factor),
+            )
+        };
+        diag!(
+            "【搜索】T{} {} MC 候选 {} 个 × {} 次 → 中选第 {} 位 值={:.1}",
+            game.turn(),
+            label,
+            cand.len(),
+            search.search_n,
+            best,
+            value
+        );
+        Ok(Some((scored[best].1, value)))
+    }
+
+    /// 合宿训练回合的蒙特卡洛前瞻（攻略优化点 3）
+    fn search_camp(
+        &self,
+        game: &MatsuriGame,
+        actions: &[Action],
+        scored: &[(f64, usize)],
+        search: &SearchConfig,
+    ) -> Result<Option<(usize, f64)>> {
+        self.mc_pick(game, actions, scored, search, self.camp_search_topk, "合宿前瞻")
+    }
+
+    /// 常规回合的蒙特卡洛前瞻（攻略优化点 1：稽古洗牌前瞻）
+    fn search_normal(
+        &self,
+        game: &MatsuriGame,
+        actions: &[Action],
+        scored: &[(f64, usize)],
+        search: &SearchConfig,
+    ) -> Result<Option<(usize, f64)>> {
+        self.mc_pick(game, actions, scored, search, self.normal_search_topk, "常规前瞻")
     }
 }
 
@@ -191,17 +297,25 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
             if !training_actions.is_empty() {
                 // 合宿期间只从训练/稽古里选（进打分表但排除休息/比赛/出行）
                 let model = Model::new(game, &self.config.trainer)?;
-                let mut best = training_actions[0];
-                let mut best_value = f64::NEG_INFINITY;
+                // 手写贪心给全部合宿训练位排序：既是无搜索时的答案，也是有搜索时的剪枝依据
+                let mut scored: Vec<(f64, usize)> = Vec::with_capacity(training_actions.len());
                 for &index in &training_actions {
                     let value = model.action_value(&actions[index]);
                     if value.is_nan() {
                         continue;
                     }
-                    if value > best_value {
-                        best_value = value;
-                        best = index;
-                    }
+                    scored.push((value, index));
+                }
+                scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let (mut best_value, mut best) = scored
+                    .first()
+                    .map_or((f64::NEG_INFINITY, training_actions[0]), |&(v, i)| (v, i));
+                // 攻略优化点 3：合宿前瞻蒙特卡洛（中选口径换成搜索到的终局期望，贪心分只负责剪枝）
+                if let Some(search) = self.camp_search.as_ref()
+                    && let Some((index, value)) = self.search_camp(game, actions, &scored, search)?
+                {
+                    best = index;
+                    best_value = value;
                 }
                 diag!(
                     "【决策】T{} 守门·合宿全练 {} 值={:.1}",
@@ -282,17 +396,25 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
 
         // 其余全部进入打分表（训练 / 稽古 / 休息 / 出行 / 比赛同权比较）
         let model = Model::new(game, &self.config.trainer)?;
-        let mut best = 0;
-        let mut best_value = f64::NEG_INFINITY;
+        // 手写贪心给全部候选排序：既是无搜索时的答案，也是有搜索时的剪枝依据
+        let mut scored: Vec<(f64, usize)> = Vec::with_capacity(actions.len());
         for (index, action) in actions.iter().enumerate() {
             let value = model.action_value(action);
             if value.is_nan() {
                 continue;
             }
-            if value > best_value {
-                best_value = value;
-                best = index;
-            }
+            scored.push((value, index));
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let (mut best_value, mut best) = scored
+            .first()
+            .map_or((f64::NEG_INFINITY, 0), |&(value, index)| (value, index));
+        // 攻略优化点 1：常规回合稽古洗牌前瞻（中选口径换成搜索到的终局期望，贪心分只负责剪枝）
+        if let Some(search) = self.normal_search.as_ref()
+            && let Some((index, value)) = self.search_normal(game, actions, &scored, search)?
+        {
+            best = index;
+            best_value = value;
         }
         diag!(
             "【决策】T{} 动作 {} 值={:.1}",

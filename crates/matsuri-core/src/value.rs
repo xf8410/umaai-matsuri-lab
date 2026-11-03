@@ -769,6 +769,16 @@ impl<'a> Model<'a> {
             let urgency = ((30.0 - self.ctx.senior_camp_left).max(0.0) / 30.0).min(1.0);
             value += self.weights.act_level * (0.5 + urgency);
         }
+        // 质变卡阶（攻略优化点 4）：Lv7→8 / Lv8→9 是技能pt 乘区的巨大跳变
+        // （+80%→+100%→+135%），跨这两级的 +1 Lv 远贵于普通级。只对编成済み演目（有卡）计，
+        // 根性无卡自动排除。吾妻外出抬最低演目 Lv 也走这里 → 自动把外出引导到质变点。
+        if self.cfg.level_step_bonus > 0.0 && self.ctx.cards[act] > 0.0 {
+            match self.game.acts.level[act] {
+                7 => value += self.cfg.level_step_bonus * 0.6, // → Lv8
+                8 => value += self.cfg.level_step_bonus,       // → Lv9（跳变更大）
+                _ => {}
+            }
+        }
         // 动态调制：演目 Lv 追赶 × 稽古节奏（落后加速 / 领先卡回合）
         value * self.ctx.dyn_act.get(act).copied().unwrap_or(1.0) * self.ctx.tempo_scale
     }

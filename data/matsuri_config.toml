@@ -52,6 +52,8 @@ status_halve_factor = 0.5
 friend_outing_deadline = 0
 # 友人外出截止急迫度权重（0 = 关闭急迫加分）
 friend_outing_urgency = 0.0
+# 演目 Lv 质变卡阶奖励：Lv7→8 / Lv8→9 跨质变点的额外加分（0=关闭；攻略点4，吾妻外出定向引导）
+level_step_bonus = 0.0
 # 五维策略权重（官方评分边际之外的偏好）
 status_weights = [1.0, 1.0, 1.0, 1.0, 1.0]
 

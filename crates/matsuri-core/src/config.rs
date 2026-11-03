@@ -77,6 +77,11 @@ pub struct TrainerConfig {
     /// 友人外出截止急迫度权重（0 = 关闭急迫加分，只按段事件 + 演目收益打分）
     #[serde(default)]
     pub friend_outing_urgency: f64,
+    /// 演目 Lv 质变卡阶奖励：把有编成卡的演目从 Lv7→8 / Lv8→9 推过质变点时的额外加分
+    /// （技能pt 乘区 +80%→+100%→+135% 的大跳变；0 = 关闭）。吾妻外出抬最低演目 Lv 时同样吃到，
+    /// 自动引导「外出卡质变点」（攻略优化点 4）。
+    #[serde(default)]
+    pub level_step_bonus: f64,
     /// 五维策略权重（官方评分边际之外的偏好；默认全 1）
     pub status_weights: [f64; 5],
     /// 属性 / 资源 / 事件的折算权重
@@ -412,6 +417,10 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         trainer.friend_outing_urgency.is_finite() && trainer.friend_outing_urgency >= 0.0,
         "trainer.friend_outing_urgency 应为非负有限数"
     );
+    ensure!(
+        trainer.level_step_bonus.is_finite() && (0.0..=2000.0).contains(&trainer.level_step_bonus),
+        "trainer.level_step_bonus 应在 0–2000（0 = 关闭质变卡阶奖励）"
+    );
     let advice = &trainer.advice;
     let entries: [(&str, f64); 9] = [
         ("advice.card", advice.card),
@@ -496,6 +505,7 @@ impl Default for TrainerConfig {
             status_halve_factor: 0.5,
             friend_outing_deadline: 0,
             friend_outing_urgency: 0.0,
+            level_step_bonus: 0.0,
             status_weights: [1.0; 5],
             weights: ValueWeights {
                 vital: 1.2,

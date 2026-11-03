@@ -97,7 +97,32 @@ fn run() -> Result<()> {
             {
                 search.radical_factor_max = radical;
             }
-            let trainer = MatsuriTrainer::new(matsuri_cfg).with_search(search, topk);
+            // 攻略优化点 3：合宿训练回合的前瞻搜索，独立于教诲搜索开关（可单独 A/B）
+            let camp_search_n: usize = std::env::var("MATSURI_CAMP_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let camp_topk: usize = std::env::var("MATSURI_CAMP_SEARCH_TOPK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4);
+            let mut camp_search = cfg.search.clone();
+            camp_search.search_n = camp_search_n;
+            // 攻略优化点 1：常规回合稽古洗牌前瞻，同样独立开关（成本高于合宿，~65 决策点/局）
+            let normal_search_n: usize = std::env::var("MATSURI_NORMAL_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let normal_topk: usize = std::env::var("MATSURI_NORMAL_SEARCH_TOPK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4);
+            let mut normal_search = cfg.search.clone();
+            normal_search.search_n = normal_search_n;
+            let trainer = MatsuriTrainer::new(matsuri_cfg)
+                .with_search(search, topk)
+                .with_camp_search(camp_search, camp_topk)
+                .with_normal_search(normal_search, normal_topk);
             runner.run_game(game, &trainer, None)?;
         }
         "random" => {
