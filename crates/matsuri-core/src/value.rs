@@ -39,6 +39,10 @@ const HIGH_VITAL_IDLE_PENALTY: f64 = 200.0;
 const HIGH_VITAL_THRESHOLD: i32 = 70;
 /// 演目 Lv 上限（有 SSR 吾妻时可到 10）
 const ACT_LEVEL_CAP: i32 = 10;
+/// 根性训练位人头不足 `root_train_min_heads` 时的软惩罚（「能不点根就不点根」——
+/// 是偏好不是禁令：人头不够时根照样能和其他动作比分数，别的动作更烂时仍会选根；
+/// 人头 ≥ 门槛则完全不受影响。量级 ≈ 一次训练的典型收益，足以让位但不封死）
+const ROOT_TRAIN_PENALTY: f64 = 3000.0;
 
 /// 拉面式属性上限软约束函数（xulai1001/umaai-rs handwritten_evaluator.rs::status_soft_function
 /// 原样移植，见 lab/属性溢出软上限旋钮移植.md §3.1）。
@@ -369,6 +373,13 @@ impl<'a> Model<'a> {
         let Ok(preview) = self.game.preview_training(train, keiko) else {
             return f64::NEG_INFINITY;
         };
+        // 根训练人头门槛：「能不点根就不点根，除非 5 人头」（0 = 关闭）
+        if self.cfg.root_train_min_heads > 0 && train == 3 {
+            let heads = self.game.participant_advice(train).participant_count;
+            if heads < self.cfg.root_train_min_heads as i32 {
+                return -ROOT_TRAIN_PENALTY;
+            }
+        }
         let fail_prob = (f64::from(preview.failure_rate) / 100.0).clamp(0.0, 1.0);
         let success = self.value_of(&preview.value)
             + self.resource_value(action)
@@ -523,6 +534,13 @@ impl<'a> Model<'a> {
     fn race_value(&self) -> f64 {
         let forced = self.game.plan.race;
         if !forced && !self.cfg.self_race {
+            return f64::NEG_INFINITY;
+        }
+        // 自选赛回合门槛：「第三年天秋后要是训练烂可以跑 g1」（0 = 关闭）
+        if !forced
+            && self.cfg.self_race_from_turn > 0
+            && self.game.turn() < self.cfg.self_race_from_turn
+        {
             return f64::NEG_INFINITY;
         }
         let mut value = self.estimated_race_reward() + self.resource_value(&Action::Race);
@@ -790,6 +808,19 @@ impl<'a> Model<'a> {
 
     /// 演目 +1 Lv 的估值（普通价值 + 発表会急迫 + Senior 合宿前目标）
     fn level_value(&self, act: usize) -> f64 {
+        // 根性演目 Lv 封顶：「第二年末根强化到 5 就可以不用管了」（0 = 关闭）。
+        // 达标后推 Lv 的打分归零（发表会达标压力除外，见下）；演目槽价值不受影响。
+        if act == 3
+            && self.cfg.root_level_cap > 0
+            && self.game.acts.level[act] >= self.cfg.root_level_cap
+            && self
+                .ctx
+                .checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| self.game.acts.level[act] >= checkpoint.required)
+        {
+            return 0.0;
+        }
         let mut value = self.weights.act_level;
         if let Some(checkpoint) = &self.ctx.checkpoint
             && self.game.acts.level[act] < checkpoint.required

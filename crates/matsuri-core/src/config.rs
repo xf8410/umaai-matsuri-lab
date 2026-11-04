@@ -100,6 +100,22 @@ pub struct TrainerConfig {
     /// 自动引导「外出卡质变点」（攻略优化点 4）。
     #[serde(default)]
     pub level_step_bonus: f64,
+    /// 根性演目 Lv 封顶（0 = 关闭）：根 Lv 达到该值后，`level_value(根)` 归零——
+    /// 「第二年末根强化到 5 就可以不用管了」。只影响推 Lv 的打分，演目槽仍照常累积。
+    #[serde(default)]
+    pub root_level_cap: i32,
+    /// 根性训练最少人头（0 = 关闭）：根训练位担当数 < 该值时吃 `ROOT_TRAIN_PENALTY`
+    /// 大额惩罚——「能不点根就不点根，除非 5 人头」。
+    #[serde(default)]
+    pub root_train_min_heads: usize,
+    /// 友人外出 +Lv 是否避开根性演目（false = 沿用三则落点）——
+    /// 「外出强化最好不要给根」。三则落点选中根时改挑非根演目里最低的；全是根才回落。
+    #[serde(default)]
+    pub outing_avoid_root: bool,
+    /// 自选比赛解禁回合（0 = 关闭；仅 `self_race = true` 时有意义）：turn ≥ 该值才允许
+    /// 把自选比赛纳入打分——「第三年天秋后要是训练烂可以跑 g1」（天秋 ≈ T65，取 66）。
+    #[serde(default)]
+    pub self_race_from_turn: i32,
     /// 五维策略权重（官方评分边际之外的偏好；默认全 1）
     pub status_weights: [f64; 5],
     /// 属性 / 资源 / 事件的折算权重
@@ -448,6 +464,18 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         trainer.level_step_bonus.is_finite() && (0.0..=2000.0).contains(&trainer.level_step_bonus),
         "trainer.level_step_bonus 应在 0–2000（0 = 关闭质变卡阶奖励）"
     );
+    ensure!(
+        (0..=10).contains(&trainer.root_level_cap),
+        "trainer.root_level_cap 应在 0–10（0 = 关闭根 Lv 封顶）"
+    );
+    ensure!(
+        trainer.root_train_min_heads <= 5,
+        "trainer.root_train_min_heads 应在 0–5（0 = 关闭根训练人头门槛）"
+    );
+    ensure!(
+        (0..=77).contains(&trainer.self_race_from_turn),
+        "trainer.self_race_from_turn 应在 0–77（0 = 关闭自选赛回合门槛）"
+    );
     let advice = &trainer.advice;
     let entries: [(&str, f64); 9] = [
         ("advice.card", advice.card),
@@ -536,6 +564,10 @@ impl Default for TrainerConfig {
             friend_outing_deadline: 0,
             friend_outing_urgency: 0.0,
             level_step_bonus: 0.0,
+            root_level_cap: 0,
+            root_train_min_heads: 0,
+            outing_avoid_root: false,
+            self_race_from_turn: 0,
             status_weights: [1.0; 5],
             weights: ValueWeights {
                 vital: 1.2,

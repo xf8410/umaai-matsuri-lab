@@ -408,8 +408,21 @@ impl MatsuriGame {
     }
 
     /// 给三则落点选出的演目 +`amount` Lv（按演目 Lv 上限夹取），返回加到的演目下标
+    ///
+    /// `trainer.outing_avoid_root`：三则落点选中根性（act 3）时改挑**非根演目**里
+    /// 三则落点最低的一个（「外出强化最好不要给根」）；只有根可挑时才回落根。
     pub(crate) fn add_lowest_act_level(&mut self, amount: i32) -> usize {
-        let act = self.lowest_act();
+        let mut act = self.lowest_act();
+        if self.config.trainer.outing_avoid_root && act == 3 {
+            let levels = self.acts.level;
+            let gauges = self.acts.gauge;
+            let alt = (0..5)
+                .filter(|candidate| *candidate != 3)
+                .min_by_key(|candidate| (levels[*candidate], gauges[*candidate], *candidate));
+            if let Some(alt) = alt {
+                act = alt;
+            }
+        }
         self.add_act_level(act, amount);
         act
     }

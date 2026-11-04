@@ -1,0 +1,77 @@
+# 卡根流派实验档（root-flow）：用户 2026-11-04 指定策略，在 ga-r2 冠军权重之上叠加。
+#
+# ── 用户策略 → 旋钮映射 ──
+#   外出尽量早点用            → friend_outing_early = true + weights.friend_outing = 120（ga-r2 已有）
+#   外出强化最好不要给根      → outing_avoid_root = true（新增旋钮，value 无关、纯落点改道）
+#   进合宿要保持好体力        → rest_vital = 64 + weights.vital（ga-r2 已有，不加新旋钮）
+#   强化训练一个一个点        → LIT_HOARD_PENALTY = 60（value.rs 既有常量）
+#   第三年天秋后训练烂可跑 G1 → self_race = true + self_race_from_turn = 66（天秋 ≈ T65 之后）
+#   第二年末根 Lv5 后不管根   → root_level_cap = 5（新增旋钮；发表会达标压力仍豁免）
+#   能不点根就不点根除非5人头 → root_train_min_heads = 5（新增旋钮；不足 5 人头吃 -3000 惩罚）
+#
+# ── fusion：第三年转成按用户口径改 ──
+#   ga-r2:  501→801, 301→901, 401→1001
+#   用户:   401→801（助力→协力）, 501→901（体力→不屈）, 301→1001（感叹号→兼修）
+#   第二年不变：101→601（羁绊→特化）, 201→701（得意率→钻研）
+#
+# ── 教诲落位（外部钉位 MATSURI_ASSIGN_PIN，见 scripts/root_flow.py）──
+#   窗口0/1（T2/T11）:   速401 耐201 力301 根501 智101
+#   窗口2/3（T23/T35）:  速401 耐301 力601 根501 智701（year2 转成后）
+#   窗口4/5（T47/T59）:  速801 耐601 力1001 根901 智701（year3 转成后；第三年合宿不换）
+#   注意：401+801 硬约束会把协力分身换到担当最多的演目；若速度不是担当最多，
+#   窗口4/5 的钉位不会命中 → 该窗口回落 Trainer（advice.route=500 先验兜底）。
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 401, target = 801 },
+    { base = 501, target = 901 },
+    { base = 301, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 1.7271
+rest_vital = 64
+checkpoint_margin = 5
+act_level_target = 9
+self_race = true
+friend_outing_early = true
+status_halve_threshold = 1200
+status_halve_factor = 0.5
+friend_outing_deadline = 0
+friend_outing_urgency = 0.0
+level_step_bonus = 0.0
+# ── 本档新增（卡根流派）──
+root_level_cap = 5
+root_train_min_heads = 5
+outing_avoid_root = true
+self_race_from_turn = 66
+status_weights = [0.6465, 0.9881, 0.8387, 0.3000, 2.6217]
+
+[trainer.weights]
+vital = 1.4774
+motivation = 23.6572
+friendship = 0.5559
+hint = 1.1725
+gauge = 27.9217
+act_level = 12.9562
+checkpoint = 1105.0179
+fat = 108.4909
+friend_outing = 120.0
+
+[trainer.advice]
+card = 1.4462
+npc = 0.4246
+train = 0.2000
+keiko = 0.7630
+level = 0.2000
+milestone = 0.2000
+status_limit = 0.0000
+assist = 0.0000
+route = 500.0000
+
+[trainer.dynamic]
+status_catchup = 1.3553
+act_catchup = 0.0000
+vital_decay = 0.2879
+vital_idle = 0.0000
+keiko_tempo = 0.4860
