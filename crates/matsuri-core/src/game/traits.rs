@@ -7,6 +7,7 @@ use crate::trainer::MatsuriTrainer;
 use anyhow::{Result, anyhow};
 use rand::Rng;
 use rand::rngs::StdRng;
+use umaai_core::AttributeArray;
 use umaai_core::gamedata::{ActionValue, EventData};
 use umasim::game::{
     CardTrainingEffect, Game, Person, PersonType, StageId, SupportCard, Trainer,
@@ -234,7 +235,27 @@ impl Game for MatsuriGame {
                 );
             }
         }
-        // ④ 剧本特例：友人出行解锁 + 疲劳回复 flag
+        // ④ 引擎继承特殊结算（4012 第二年 / 4013 第三年）：事件数据为零值，属性、PT 与
+        //    上限由公式结算（蓝因子 × 6 + 剧本因子 × scale；上限 = floor(蓝因子 × 5.33)）。
+        //    引擎把这段写在样例局 BasicGame 的 apply_event 里，剧本侧（BaseGame 底座）需自持。
+        if matches!(event.id, 4012 | 4013) {
+            let value = ActionValue {
+                status_pt: self.base.inherit.inherit(rng),
+                ..Default::default()
+            };
+            let limit = self.base.inherit.inherit_limit(rng);
+            self.uma_mut().add_value(&value);
+            self.uma_mut().five_status_limit.add_eq(&limit);
+            diag!(
+                "【继承】T{} #{} {}｜属性 {:?} 上限 {:?}",
+                self.turn(),
+                event.id,
+                event.name,
+                value.status_pt,
+                limit
+            );
+        }
+        // ⑤ 剧本特例：友人出行解锁 + 疲劳回复 flag
         if event.id == super::event::FRIEND_OUT_EVENT_ID {
             self.base.friend.out_state = umasim::game::FriendOutState::AfterUnlock;
             self.fatigue_recovery = true;
@@ -243,7 +264,7 @@ impl Game for MatsuriGame {
                 self.turn()
             );
         }
-        // ⑤ 事件额外效果（演目 gauge / 解 debuff）
+        // ⑥ 事件额外效果（演目 gauge / 解 debuff）
         self.apply_event_extra(event.id, choice);
         diag!(
             "【事件结算】T{} #{} {} 选项{}｜变化 {}",
@@ -253,7 +274,7 @@ impl Game for MatsuriGame {
             choice,
             before.diff(&self.key_state())
         );
-        // ⑥ 事件记录（S8 手动 / 前端核对）：记录实际到账数值与状态变化
+        // ⑦ 事件记录（S8 手动 / 前端核对）：记录实际到账数值与状态变化
         let mut detail = result
             .as_ref()
             .map(|result| result.value.to_string())
@@ -459,6 +480,24 @@ impl Game for MatsuriGame {
     }
 }
 
+impl MatsuriGame {
+    /// 执行一个**已由本局面选定**的动作：随机只取自持策略流，不碰调用方的决策流
+    ///
+    /// 搜索的根动作必须走这条：`run_stage` 内执行动作用的就是策略流，若根动作改用调用方
+    /// 传入的 `rng`，被评估的动作与真实对局路径随机来源不一致，CRN 在根节点就分叉，
+    /// 候选排序被系统性污染且不报错。
+    pub(crate) fn apply_selected_action(&mut self, action: &Action) -> Result<()> {
+        let Some(mut strategy) = self.strategy else {
+            return Err(anyhow!(
+                "策略流缺失：主种子已注入但策略流未派生，应先调用 set_rule_master"
+            ));
+        };
+        let res = self.apply_action(action, &mut strategy);
+        self.strategy = Some(strategy);
+        res
+    }
+}
+
 impl FlatSearchGame for MatsuriGame {
     /// rollout 基策 = 本剧本的手写训练员（随机基策搜出来的动作价值没有可用口径）
     type RolloutTrainer = MatsuriTrainer;
@@ -471,9 +510,10 @@ impl FlatSearchGame for MatsuriGame {
         MatsuriTrainer::new(MatsuriConfig::default())
     }
 
-    fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
-        // 必须与 `run_stage` 内执行动作的方式逐字一致，否则被评估的动作会用上另一条流
-        self.apply_action(action, rng)
+    fn apply_root_action(&mut self, action: &Self::Action, _rng: &mut StdRng) -> Result<()> {
+        // 必须与 `run_stage` 内执行动作的方式逐字一致：走本局面自持的策略流，
+        // 不能用调用方的决策流（否则根动作随机来源不一致，CRN 在根节点分叉）
+        self.apply_selected_action(action)
     }
 
     fn fork_for_rollout(&self, rollout_seed: u64) -> Self {

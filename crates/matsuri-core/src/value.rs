@@ -330,6 +330,10 @@ impl<'a> Model<'a> {
 
     /// 教诲分配方案估值（与 `apply_assignment` 的 801 硬约束同口径）
     pub(crate) fn assignment_value(&self, assign: &AdviceAssignment) -> f64 {
+        // 越界槽位直接否掉：搜索会枚举候选，panic 比给 −∞ 贵得多
+        if assign.0.iter().any(|slot| *slot >= 5) {
+            return f64::NEG_INFINITY;
+        }
         let effective = self.effective_assignment(assign);
         let mut total = 0.0;
         for (act, source) in effective.iter().enumerate() {
@@ -359,7 +363,13 @@ impl<'a> Model<'a> {
         let hits = effective
             .iter()
             .enumerate()
-            .filter(|&(act, &source)| self.game.advice.slots[usize::from(source)] == prior[act])
+            .filter(|&(act, &source)| {
+                self.game
+                    .advice
+                    .slots
+                    .get(usize::from(source))
+                    .is_some_and(|slot| *slot == prior[act])
+            })
             .count();
         hits as f64 * self.advice.route
     }
@@ -915,8 +925,8 @@ impl<'a> Model<'a> {
         }
         self.value_of(&value)
             + self.extra_status_value(row.extra_status.as_ref())
-            + self.flags_value(row.add_flags.as_ref(), -1.0)
-            + self.flags_value(row.remove_flags.as_ref(), 1.0)
+            + self.flags_value(row.add_flags.as_ref(), 1.0)
+            + self.flags_value(row.remove_flags.as_ref(), -1.0)
     }
 
     /// `ExtraStatus` 的期望价值（随机项按当前五维平均边际；上次训练项取 `last_train` 轴）
@@ -939,36 +949,36 @@ impl<'a> Model<'a> {
         }
     }
 
-    /// 状态增删的估值（`sign`：+1 = 移除（收益），-1 = 添加（惩罚））
+    /// 状态增删的估值（`sign`：+1 = 添加，-1 = 移除；净值 = 增益 − 惩罚）
+    ///
+    /// 增益项（傲娇 / 良训练员 / 精神清爽 / 幸运）与惩罚项（变胖 / 各类 ill）必须分开
+    /// 累加再相减：混成一个 `magnitude` 再乘符号，会把「加上一个增益 flag」算成扣分、
+    /// 「移除一个增益 flag」算成加分，事件选项排序整体反向。
     fn flags_value(&self, flags: Option<&UmaFlags>, sign: f64) -> f64 {
         let Some(flags) = flags else {
             return 0.0;
         };
-        let mut magnitude = 0.0;
+        let mut harm = 0.0;
+        let mut benefit = 0.0;
         if flags.ill.contains(Ill::FAT) {
-            magnitude += self.weights.fat;
+            harm += self.weights.fat;
         }
-        for kind in [
-            Ill::SKIN,
-            Ill::HEADACHE,
-            Ill::LAZY,
-            Ill::NIGHT,
-            Ill::BAD_TRAINER,
-        ] {
+        for kind in [Ill::SKIN, Ill::HEADACHE, Ill::LAZY, Ill::NIGHT] {
             if flags.ill.contains(kind) {
-                magnitude += OTHER_ILL_PENALTY;
+                harm += OTHER_ILL_PENALTY;
             }
         }
-        if flags.bad_trainer {
-            magnitude += OTHER_ILL_PENALTY;
+        // `bad_trainer` 与 `Ill::BAD_TRAINER` 同置同清，只计一次
+        if flags.bad_trainer || flags.ill.contains(Ill::BAD_TRAINER) {
+            harm += OTHER_ILL_PENALTY;
         }
         if flags.aijiao || flags.good_trainer {
-            magnitude += 30.0;
+            benefit += 30.0;
         }
         if flags.refresh_mind > 0 || flags.lucky_count > 0 {
-            magnitude += 20.0;
+            benefit += 20.0;
         }
-        magnitude * sign
+        (benefit - harm) * sign
     }
 
     /// 追加稽古上档「解一个 debuff」的估值
