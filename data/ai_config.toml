@@ -58,7 +58,10 @@ search_n = 1024
 max_depth = 0
 
 # 激进度因子上限
-radical_factor_max = 50.0
+# lab 定档 0.0（上游仍 50.0）：48 局矩阵 seeds 70004–70015、N=128/topk=4 配对 CRN，
+# rad50 75394.1 → rad0 78015.9，Δ+2621.8、t=4.11、胜 12/12，且零额外成本；
+# 同档 N 128→1024 的边际只有 +791.5 却要花 4 倍时间。见 lab/RESULTS.md §9.4。
+radical_factor_max = 0.0
 
 # UCB 动态分配开关
 use_ucb = true

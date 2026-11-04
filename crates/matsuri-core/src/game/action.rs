@@ -108,12 +108,12 @@ impl MatsuriGame {
 
     /// 比赛结算：目标赛 / URA 决赛 / 自选比赛统一走 [`BaseGame::push_race_event`]
     ///
-    /// `scale = (100 + 支援卡赛后加成 + 発表会 / 本番永久比赛加成) / 100`；取整（floor）在引擎。
+    /// 五维系 = [`MatsuriGame::race_scale`]（卡面赛后 × 剧本赛后，乘算）；取整（floor）在引擎。
     /// 演目槽：目标赛（含 URA 决赛）+4（按 4 次 +1 三则落点）；自选比赛（非目标）+1。
     pub(crate) fn do_race(&mut self) -> Result<()> {
         let before = self.key_state();
         let goal = self.plan.race;
-        let scale = (100 + self.base.uma.race_bonus + self.scenario_race_bonus()) as f64 / 100.0;
+        let scale = self.race_scale();
         self.base.push_race_event(scale, 1.0)?;
         let gain = if goal {
             self.data.rules.act_gauge_gain.target_race

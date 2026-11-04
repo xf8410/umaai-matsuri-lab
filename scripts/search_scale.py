@@ -31,8 +31,8 @@ FIVE_RE = re.compile(r"│\s*(\d+)\s*│\s*(\d+)\s*│\s*(\d+)\s*│\s*(\d+)\s*�
 LV_RE = re.compile(r"演目Lv\s*\[([0-9, ]+)\]")
 
 
-def play(binary: Path, seed: int, n: int, topk: int, radical: float) -> dict:
-    (REPO / "matsuri_config.toml").write_text(BASE.read_text(encoding="utf8"), encoding="utf8")
+def play(binary: Path, cfg: Path, seed: int, n: int, topk: int, radical: float) -> dict:
+    (REPO / "matsuri_config.toml").write_text(cfg.read_text(encoding="utf8"), encoding="utf8")
     (REPO / "ai_config.toml").write_text(
         f"[sim]\nseed = {seed}\numa = {UMA}\ncards = [{', '.join(map(str, CARDS))}]\n"
         f"[search]\nradical_factor_max = {radical}\n", encoding="utf8")
@@ -80,11 +80,13 @@ def main() -> int:
     ap.add_argument("--seeds", default="70001-70006")
     ap.add_argument("--out", default="/tmp/search_scale_results.json")
     ap.add_argument("--binary", default=str(BIN))
+    ap.add_argument("--config", default=str(BASE), help="matsuri_config 覆盖层来源")
     ap.add_argument("--ns", default="128,1024,8192", help="search_n 档，逗号分隔")
     ap.add_argument("--topk", type=int, default=4)
     ap.add_argument("--radicals", default="50.0", help="radical_factor_max 档，逗号分隔")
     args = ap.parse_args()
     binary = Path(args.binary)
+    cfg = Path(args.config)
     global ARMS
     ARMS = [(f"n{n}-rad{r:g}", n, args.topk, r)
             for n in (int(x) for x in args.ns.split(","))
@@ -97,7 +99,7 @@ def main() -> int:
     done = 0
     for seed in seeds:
         for tag, n, topk, rad in ARMS:
-            rec = play(binary, seed, n, topk, rad)
+            rec = play(binary, cfg, seed, n, topk, rad)
             runs[tag].append(rec)
             done += 1
             print(f"[{tag}] {done}/{total} seed={seed} score={rec['score']} "
@@ -118,7 +120,8 @@ def main() -> int:
                         "act_lv_mean": [mean([r["lv"][i] for r in rs if len(r["lv"]) == 5])
                                         for i in range(5)]})
     base = runs[ARMS[0][0]]
-    out = {"summary": summary,
+    out = {"binary": str(binary), "config": str(cfg),
+           "summary": summary,
            "paired_vs_first": {tag: paired(base, runs[tag]) for tag, _, _, _ in ARMS[1:]},
            "runs": runs}
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf8")

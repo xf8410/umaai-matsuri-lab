@@ -272,9 +272,21 @@ impl MatsuriGame {
         bonus
     }
 
-    /// 比赛加成 %（支援卡赛后 + 発表会累计 race_bonus，**同表加算**；2026-11-01 拍板）
+    /// 剧本侧比赛加成 %（発表会 / 本番累计值；与支援卡赛后**分开计算**后乘算）
     pub(crate) fn scenario_race_bonus(&self) -> i32 {
         self.presentation_bonus().race_bonus
+    }
+
+    /// 比赛奖励实际系数（五维）：**卡面赛后 × 剧本赛后**（乘算，不是同表加算）
+    ///
+    /// 取整（floor）由引擎 [`umasim::game::base::BaseGame::push_race_event`] 在面板乘完后
+    /// 统一做一次。上游这里还有第三项「狄杜斯铁心五维倍率」，本仓不接：106301/106302
+    /// 在禁用名单里，`special_race_stats_bonus` 恒 0，接了只是白搭一层分支；PT 侧的
+    /// `race_pt_rate`（铁心 ×0.46）同理恒 1.0。
+    pub(crate) fn race_scale(&self) -> f64 {
+        let card = (100 + self.base.uma.race_bonus) as f64 / 100.0;
+        let scenario = (100 + self.scenario_race_bonus()) as f64 / 100.0;
+        card * scenario
     }
 
     /// 判定一场発表会 / 本番结果：`need_act_num` 个演目达到 `need_act_level` → 大成功，否则成功

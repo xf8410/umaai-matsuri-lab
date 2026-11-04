@@ -32,11 +32,21 @@ pub fn data_dir() -> PathBuf {
 /// 引擎全局数据 `Data::init` 幂等（同数据根直接复用），因此可在多个测试里重复调用。
 pub fn sample_game() -> MatsuriGame {
     let root = data_dir();
+    let cfg = umaai::Config::load_with_overlay_file(&root, ".").expect("载入引擎配置失败");
+    sample_game_with_uma(cfg.sim.uma)
+}
+
+/// 用指定马娘建一局（上游 overflow / endgame 估值测试用；固定主种子 42）
+///
+/// 注意：这里的马娘 id 只是**单测夹具**，与实局禁用名单（106301/106302）无关——
+/// 单测不跑完整育成，只用初始局面验估值分支。
+pub fn sample_game_with_uma(uma_id: u32) -> MatsuriGame {
+    let root = data_dir();
     Data::init(&root).expect("引擎静态数据初始化失败");
     let cfg = umaai::Config::load_with_overlay_file(&root, ".").expect("载入引擎配置失败");
     let data = Arc::new(MatsuriData::load(&root).expect("载入剧本数据失败"));
     let mut game = MatsuriGame::newgame(
-        cfg.sim.uma,
+        uma_id,
         &cfg.sim.cards,
         cfg.inherit(),
         cfg.race_grades().expect("赛程等级表加载失败"),
