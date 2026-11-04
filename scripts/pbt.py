@@ -43,10 +43,25 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bopt import KEYS, GP, expected_improvement, from_unit, to_unit  # noqa: E402
-from ga import BOUNDS, clamp_mutate, evaluate, genome_to_toml, parse_overlay, paired_stats  # noqa: E402
+from ga import BOUNDS, evaluate, genome_to_toml, parse_overlay, paired_stats  # noqa: E402
 from ga import seed_genome  # noqa: E402
 
 OPS = ["ga", "es", "sa", "bo"]
+
+def clamp_mutate_rate(g, rng, rate: float = 1.0):
+    """旧版 ga.clamp_mutate 语义（pbt 的 hp 按此设计）：rate 控制变异**概率**
+    （平均每代改 4×rate 个旋钮），步长固定 0.12×量程。新版 clamp_mutate 改成了
+    sigma 控制步长、概率固定 1/len，直接把 hp 传 sigma 会语义错位。"""
+    child = dict(g)
+    per = max(rate / len(BOUNDS), 0.02)
+    for key, (lo, hi, is_int) in BOUNDS.items():
+        if rng.random() < per * 4:
+            span = hi - lo
+            child[key] = min(hi, max(lo, child[key] + rng.gauss(0.0, 0.12 * span)))
+            if is_int:
+                child[key] = float(round(child[key]))
+    return child
+
 SIGMA = 0.08  # ES / SA 在单位立方体里的基准步长
 
 
@@ -87,7 +102,7 @@ def step_member(m: Member, rng: random.Random, gen: int, gens: int,
     下一代的评估阶段用得上（ES 的 1/5 成功法则、SA 的 Metropolis 回退）。"""
     m.prev, m.g_before = m.fitness, dict(m.g)
     if m.op == "ga":
-        m.g = clamp_mutate(m.g, rng, rate=m.hp)
+        m.g = clamp_mutate_rate(m.g, rng, rate=m.hp)
     elif m.op == "es":
         # 逐维独立高斯步（单位立方体口径），σ = m.hp 由成功法则自适应
         x = to_unit(m.g) + np.array([rng.gauss(0.0, m.hp) for _ in KEYS])
@@ -108,7 +123,7 @@ def step_member(m: Member, rng: random.Random, gen: int, gens: int,
         try:
             gp.fit(X, y)
         except (np.linalg.LinAlgError, ValueError):
-            m.g = clamp_mutate(m.g, rng, rate=1.0)
+            m.g = clamp_mutate_rate(m.g, rng, rate=1.0)
             return
         npr = args.npr
         cand = np.clip(np.vstack([npr.random((512, len(KEYS))),
@@ -119,7 +134,7 @@ def step_member(m: Member, rng: random.Random, gen: int, gens: int,
         m.g = from_unit(cand[int(np.argmax(ei))])
         m.tag = f"bo ell={gp.ell:.2f}"
     else:
-        m.g = clamp_mutate(m.g, rng, rate=1.0)
+        m.g = clamp_mutate_rate(m.g, rng, rate=1.0)
     m.dirty = True
 
 
@@ -220,7 +235,7 @@ def main() -> int:
     for i in range(args.pop):
         op = OPS[i % len(OPS)]
         lo, hi = hp_bounds(op)
-        g = dict(base_g) if i == 0 else clamp_mutate(base_g, rng, rate=1.5)
+        g = dict(base_g) if i == 0 else clamp_mutate_rate(base_g, rng, rate=1.5)
         pop.append(Member(g, op, float(np.exp(rng.uniform(math.log(lo), math.log(hi)))),
                           tag="seed" if i == 0 else "init"))
 

@@ -1,0 +1,199 @@
+{
+  "champion_tag": "gen2:ga",
+  "champion_holdout": {
+    "fitness": 72574.87,
+    "n": 100,
+    "min": 59688,
+    "max": 80037,
+    "pt": 10703.26,
+    "five": 11169.71,
+    "lv": [
+      9.99,
+      9.85,
+      9.74,
+      7.21,
+      9.95
+    ]
+  },
+  "baseline_holdout": {
+    "fitness": 72404.58,
+    "n": 100,
+    "min": 59688,
+    "max": 80037,
+    "pt": 10659.84,
+    "five": 11162.51,
+    "lv": [
+      9.94,
+      9.81,
+      9.74,
+      7.23,
+      9.93
+    ]
+  },
+  "paired_delta": 170.3,
+  "paired_t": 0.6,
+  "champion_wins": 30,
+  "n": 100,
+  "evals": 80,
+  "history": [
+    {
+      "gen": 0,
+      "best": 70636.0,
+      "mean": 70055.6,
+      "base": 70536.4,
+      "ops": {
+        "ga": 2,
+        "es": 2,
+        "sa": 2,
+        "bo": 2
+      },
+      "evals": 8,
+      "seconds": 32.1
+    },
+    {
+      "gen": 1,
+      "best": 71394.5,
+      "mean": 68974.1,
+      "base": 70536.4,
+      "ops": {
+        "ga": 3,
+        "bo": 3,
+        "es": 1,
+        "sa": 1
+      },
+      "evals": 16,
+      "seconds": 65.4
+    },
+    {
+      "gen": 2,
+      "best": 71530.9,
+      "mean": 70339.9,
+      "base": 70536.4,
+      "ops": {
+        "ga": 4,
+        "bo": 2,
+        "es": 1,
+        "sa": 1
+      },
+      "evals": 24,
+      "seconds": 96.9
+    },
+    {
+      "gen": 3,
+      "best": 71530.9,
+      "mean": 70103.4,
+      "base": 70536.4,
+      "ops": {
+        "ga": 5,
+        "bo": 2,
+        "sa": 1
+      },
+      "evals": 32,
+      "seconds": 128.3
+    },
+    {
+      "gen": 4,
+      "best": 71530.9,
+      "mean": 70280.4,
+      "base": 70536.4,
+      "ops": {
+        "ga": 6,
+        "bo": 1,
+        "sa": 1
+      },
+      "evals": 40,
+      "seconds": 159.8
+    },
+    {
+      "gen": 5,
+      "best": 70887.9,
+      "mean": 69810.9,
+      "base": 70536.4,
+      "ops": {
+        "ga": 8
+      },
+      "evals": 48,
+      "seconds": 191.2
+    },
+    {
+      "gen": 6,
+      "best": 70604.6,
+      "mean": 69936.3,
+      "base": 70536.4,
+      "ops": {
+        "ga": 8
+      },
+      "evals": 56,
+      "seconds": 222.7
+    },
+    {
+      "gen": 7,
+      "best": 71007.2,
+      "mean": 69976.2,
+      "base": 70536.4,
+      "ops": {
+        "ga": 8
+      },
+      "evals": 64,
+      "seconds": 254.2
+    },
+    {
+      "gen": 8,
+      "best": 70769.2,
+      "mean": 69887.7,
+      "base": 70536.4,
+      "ops": {
+        "ga": 8
+      },
+      "evals": 72,
+      "seconds": 285.8
+    },
+    {
+      "gen": 9,
+      "best": 70797.2,
+      "mean": 69796.6,
+      "base": 70536.4,
+      "ops": {
+        "ga": 8
+      },
+      "evals": 80,
+      "seconds": 316.8
+    }
+  ],
+  "genome": {
+    "pt_favor_rate": 1.7271,
+    "rest_vital": 64.0,
+    "checkpoint_margin": 5.0,
+    "act_level_target": 9.0,
+    "weights.vital": 1.4774,
+    "weights.motivation": 23.6572,
+    "weights.friendship": 0.5559,
+    "weights.hint": 1.1725,
+    "weights.gauge": 27.9217,
+    "weights.act_level": 0.0,
+    "weights.checkpoint": 834.6247046241396,
+    "weights.fat": 108.4909,
+    "advice.card": 1.4462,
+    "advice.npc": 0.5009890354344024,
+    "advice.train": 0.2,
+    "advice.keiko": 0.763,
+    "advice.level": 0.2,
+    "advice.milestone": 0.2,
+    "advice.status_limit": 0.0,
+    "advice.assist": 0.0,
+    "advice.route": 500.0,
+    "status_halve_threshold": 1200.0,
+    "friend_outing_urgency": 0.0,
+    "weights.friend_outing": 120.0,
+    "dynamic.status_catchup": 1.3553,
+    "dynamic.act_catchup": 0.0,
+    "dynamic.vital_decay": 0.2879,
+    "dynamic.vital_idle": 0.0,
+    "dynamic.keiko_tempo": 0.486,
+    "status_weights.0": 0.6373893055062204,
+    "status_weights.1": 0.9881,
+    "status_weights.2": 0.8387,
+    "status_weights.3": 0.3,
+    "status_weights.4": 2.6217
+  }
+}
