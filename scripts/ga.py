@@ -76,6 +76,13 @@ BOUNDS: dict[str, tuple[float, float, bool]] = {
     "dynamic.vital_decay": (0.0, 1.0, False),
     "dynamic.vital_idle": (0.0, 4.0, False),
     "dynamic.keiko_tempo": (0.0, 4.0, False),
+    # 轮次 9 新加的三项（§8.8-1）：减半阈值 + 友人外出两键。
+    # 此前 genome_to_toml 不输出它们，覆盖层 [trainer] 整段替换 → GA 评估实际跑在
+    # halve=0 / friend_outing=0 上，与 ga-r2.toml 的实机口径不一致；纳入基因后
+    # parse_overlay 能从 ga-r2 起点读出 1200 / 120 / 0。
+    "status_halve_threshold": (0.0, 2400.0, True),
+    "friend_outing_urgency": (0.0, 400.0, False),
+    "weights.friend_outing": (0.0, 400.0, False),
 }
 
 # 变异步长 = 量程的比例；大旋钮小步走，免得一步跳出盆地
@@ -107,6 +114,11 @@ checkpoint_margin = {int(g['checkpoint_margin'])}
 act_level_target = {int(g['act_level_target'])}
 self_race = false
 friend_outing_early = true
+status_halve_threshold = {int(g['status_halve_threshold'])}
+status_halve_factor = 0.5
+friend_outing_deadline = 0
+friend_outing_urgency = {g['friend_outing_urgency']:.4f}
+level_step_bonus = 0.0
 status_weights = [{sw}]
 
 [trainer.weights]
@@ -118,6 +130,7 @@ gauge = {g['weights.gauge']:.4f}
 act_level = {g['weights.act_level']:.4f}
 checkpoint = {g['weights.checkpoint']:.4f}
 fat = {g['weights.fat']:.4f}
+friend_outing = {g['weights.friend_outing']:.4f}
 
 [trainer.advice]
 card = {g['advice.card']:.4f}
@@ -256,6 +269,8 @@ def seed_genome() -> dict[str, float]:
         "advice.card": 1.1, "advice.npc": 0.6, "advice.train": 1.0,
         "advice.keiko": 1.3, "advice.level": 1.3, "advice.milestone": 1.1,
         "advice.status_limit": 0.0, "advice.assist": 0.0, "advice.route": 500.0,
+        "status_halve_threshold": 1200.0, "friend_outing_urgency": 0.0,
+        "weights.friend_outing": 120.0,
         "dynamic.status_catchup": 1.0, "dynamic.act_catchup": 0.0,
         "dynamic.vital_decay": 0.0, "dynamic.vital_idle": 0.0,
         "dynamic.keiko_tempo": 0.0,
