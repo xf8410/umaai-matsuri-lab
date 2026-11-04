@@ -104,6 +104,10 @@ pub struct TrainerConfig {
     /// 「第二年末根强化到 5 就可以不用管了」。只影响推 Lv 的打分，演目槽仍照常累积。
     #[serde(default)]
     pub root_level_cap: i32,
+    /// 根 Lv 封顶的截止回合（0 = 全程封顶）：turn ≥ 该值后封顶解除、根恢复正常升级打分。
+    /// 用户口径：Lv5 只是第二年末达标线（发表会 T47 = 5 演目 Lv5），第三年照升。
+    #[serde(default)]
+    pub root_level_cap_until: i32,
     /// 根性训练最少人头（0 = 关闭）：根训练位担当数 < 该值时吃 `ROOT_TRAIN_PENALTY`
     /// 大额惩罚——「能不点根就不点根，除非 5 人头」。
     #[serde(default)]
@@ -469,6 +473,10 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         "trainer.root_level_cap 应在 0–10（0 = 关闭根 Lv 封顶）"
     );
     ensure!(
+        (0..=77).contains(&trainer.root_level_cap_until),
+        "trainer.root_level_cap_until 应在 0–77（0 = 全程封顶）"
+    );
+    ensure!(
         trainer.root_train_min_heads <= 5,
         "trainer.root_train_min_heads 应在 0–5（0 = 关闭根训练人头门槛）"
     );
@@ -565,6 +573,7 @@ impl Default for TrainerConfig {
             friend_outing_urgency: 0.0,
             level_step_bonus: 0.0,
             root_level_cap: 0,
+            root_level_cap_until: 0,
             root_train_min_heads: 0,
             outing_avoid_root: false,
             self_race_from_turn: 0,

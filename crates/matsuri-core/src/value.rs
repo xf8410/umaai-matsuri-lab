@@ -373,8 +373,11 @@ impl<'a> Model<'a> {
         let Ok(preview) = self.game.preview_training(train, keiko) else {
             return f64::NEG_INFINITY;
         };
-        // 根训练人头门槛：「能不点根就不点根，除非 5 人头」（0 = 关闭）
-        if self.cfg.root_train_min_heads > 0 && train == 3 {
+        // 根训练人头门槛：「能不点根就不点根，除非 5 人头」（0 = 关闭）。
+        // 只管**普通训练**；稽古不受门槛限制——根演目升级只能靠稽古填槽，
+        // 卡稽古等于把根 Lv 永久锁死（用户口径：Lv5 是达标线，不是一直不给升）。
+        // 软惩罚非禁令：别的动作都更烂时根训练照样能被选上。
+        if self.cfg.root_train_min_heads > 0 && train == 3 && !keiko {
             let heads = self.game.participant_advice(train).participant_count;
             if heads < self.cfg.root_train_min_heads as i32 {
                 return -ROOT_TRAIN_PENALTY;
@@ -808,10 +811,13 @@ impl<'a> Model<'a> {
 
     /// 演目 +1 Lv 的估值（普通价值 + 発表会急迫 + Senior 合宿前目标）
     fn level_value(&self, act: usize) -> f64 {
-        // 根性演目 Lv 封顶：「第二年末根强化到 5 就可以不用管了」（0 = 关闭）。
-        // 达标后推 Lv 的打分归零（发表会达标压力除外，见下）；演目槽价值不受影响。
+        // 根性演目 Lv 封顶：「第二年末根强化到 5 就可以不用管了」。
+        // 只是**达标线不是禁令**：`root_level_cap_until`（>0）之后封顶解除，根恢复正常
+        // 升级打分；封顶期内达标后推 Lv 的打分归零（发表会达标压力除外）；演目槽价值不受影响。
         if act == 3
             && self.cfg.root_level_cap > 0
+            && (self.cfg.root_level_cap_until == 0
+                || self.game.turn() < self.cfg.root_level_cap_until)
             && self.game.acts.level[act] >= self.cfg.root_level_cap
             && self
                 .ctx

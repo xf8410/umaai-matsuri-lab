@@ -6,8 +6,10 @@
 #   进合宿要保持好体力        → rest_vital = 64 + weights.vital（ga-r2 已有，不加新旋钮）
 #   强化训练一个一个点        → LIT_HOARD_PENALTY = 60（value.rs 既有常量）
 #   第三年天秋后训练烂可跑 G1 → self_race = true + self_race_from_turn = 66（天秋 ≈ T65 之后）
-#   第二年末根 Lv5 后不管根   → root_level_cap = 5（新增旋钮；发表会达标压力仍豁免）
-#   能不点根就不点根除非5人头 → root_train_min_heads = 5（新增旋钮；不足 5 人头吃 -3000 惩罚）
+#   第二年末根 Lv5 后不管根   → root_level_cap = 5 + root_level_cap_until = 48
+#                               （Lv5 是第二年末达标线，T48 起封顶解除、第三年根照常升级）
+#   能不点根就不点根除非5人头 → root_train_min_heads = 5（新增旋钮；软惩罚 -3000 让位不封死，
+#                               人头 ≥5 完全不受影响）
 #
 # ── fusion：第三年转成按用户口径改 ──
 #   ga-r2:  501→801, 301→901, 401→1001
@@ -42,6 +44,7 @@ friend_outing_urgency = 0.0
 level_step_bonus = 0.0
 # ── 本档新增（卡根流派）──
 root_level_cap = 5
+root_level_cap_until = 48
 root_train_min_heads = 5
 outing_avoid_root = true
 self_race_from_turn = 66
