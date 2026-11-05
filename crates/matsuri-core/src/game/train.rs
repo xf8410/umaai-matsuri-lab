@@ -49,11 +49,26 @@ impl MatsuriGame {
     /// 并发约束：标记挂在局面对象上，同一局面不可被多线程同时预览；搜索的每个 rollout
     /// 各持克隆（`fork_for_rollout`），因此并行搜索不受影响。
     pub fn preview_training(&self, train: usize, keiko: bool) -> Result<TrainingPreview> {
+        Ok(self.preview_training_full(train, keiko)?.0)
+    }
+
+    /// 训练预览（附带本次参与教诲聚合与闪彩人数）
+    ///
+    /// 估值层同一候选要用到 `failure_rate` / `TrainingPreview` / 羁绊与闪彩人数；把
+    /// `participant_advice` / `shining_count` 一次算好后向下传，避免同一候选重算 3–4 遍
+    /// （上游 7252b84 的估值层去重）。
+    pub(crate) fn preview_training_full(
+        &self,
+        train: usize,
+        keiko: bool,
+    ) -> Result<(TrainingPreview, super::advice::ParticipantAdvice, usize)> {
         if train >= 5 {
             return Err(anyhow::anyhow!("普通训练下标越界: {train}（训练位 0–4）"));
         }
         let _quiet = umaai_core::diag::DiagGuard::suppress();
         let _guard = self.keiko_settling.scoped(keiko);
+        let advice = self.participant_advice(train);
+        let shining = self.shining_count(train);
         let buffs = self.calc_training_buff(train)?;
         let failure_rate = self.calc_training_failure_rate(&buffs, train)?;
         let mut value = self.calc_training_value(&buffs, train)?;
@@ -61,11 +76,15 @@ impl MatsuriGame {
         if self.is_fat() {
             value.status_pt[0] = 0;
         }
-        Ok(TrainingPreview {
-            value,
-            failure_rate,
-            keiko,
-        })
+        Ok((
+            TrainingPreview {
+                value,
+                failure_rate,
+                keiko,
+            },
+            advice,
+            shining,
+        ))
     }
 
     /// 动作的剧本资源预览：演目槽 / 演目 Lv 差值（正 = 增加，负 = 排练成功清槽）

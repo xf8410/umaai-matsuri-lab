@@ -446,7 +446,8 @@ impl<'a> Model<'a> {
 
     /// 训练 / 演目稽古估值（成功收益 × (1-p) + 失败惩罚 × p）
     fn train_value(&self, train: usize, keiko: bool, action: &Action) -> f64 {
-        let Ok(preview) = self.game.preview_training(train, keiko) else {
+        // 预览同时返回参与教诲与闪彩人数，供门槛判定与羁绊估值复用（同一候选不重算）
+        let Ok((preview, advice, shining)) = self.game.preview_training_full(train, keiko) else {
             return f64::NEG_INFINITY;
         };
         // 根训练人头门槛：「能不点根就不点根，除非 5 人头」（0 = 关闭）。
@@ -454,7 +455,7 @@ impl<'a> Model<'a> {
         // 卡稽古等于把根 Lv 永久锁死（用户口径：Lv5 是达标线，不是一直不给升）。
         // 软惩罚非禁令：别的动作都更烂时根训练照样能被选上。
         if self.cfg.root_train_min_heads > 0 && train == 3 && !keiko {
-            let heads = self.game.participant_advice(train).participant_count;
+            let heads = advice.participant_count;
             if heads < self.cfg.root_train_min_heads as i32 {
                 return -ROOT_TRAIN_PENALTY;
             }
@@ -462,7 +463,7 @@ impl<'a> Model<'a> {
         let fail_prob = (f64::from(preview.failure_rate) / 100.0).clamp(0.0, 1.0);
         let mut success = self.value_of_with(&preview.value, true)
             + self.resource_value(action)
-            + self.training_friendship(train)
+            + self.training_friendship(train, &advice, shining)
             + self.kensan_bonus(action);
         // 主属性近顶时，副属性 / PT 仍是速训练的价值来源：给一个小幅保留加分，
         // 避免溢出层把「速训练 → 力量 / PT」完全倾斜掉。
@@ -573,23 +574,22 @@ impl<'a> Model<'a> {
 
     /// 普通出行估值（出行事件期望 + 演目槽 +1）
     fn normal_outing_value(&self) -> f64 {
-        let data = Data::get().ok();
-        let events: Vec<&umaai_core::gamedata::EventData> = data
-            .iter()
-            .flat_map(|data| data.events.system_events.iter())
-            .filter(|(key, _)| key.starts_with("normal_outing"))
-            .map(|(_, event)| event)
-            .collect();
-        let expected = if events.is_empty() {
-            60.0
-        } else {
-            events
-                .iter()
-                .filter_map(|event| event.choices.first())
-                .map(|group| self.event_choice_value(0, 0, group))
-                .sum::<f64>()
-                / events.len() as f64
-        };
+        // 单遍累加：原实现先把 22 条系统事件过滤进临时 Vec，再取长度与求和
+        // （上游 7252b84；候选每次估值都白分配一条 Vec）
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        if let Ok(data) = Data::get() {
+            for (key, event) in &data.events.system_events {
+                if !key.starts_with("normal_outing") {
+                    continue;
+                }
+                count += 1;
+                if let Some(group) = event.choices.first() {
+                    sum += self.event_choice_value(0, 0, group);
+                }
+            }
+        }
+        let expected = if count == 0 { 60.0 } else { sum / count as f64 };
         let mut value = expected + self.resource_value(&Action::NormalOuting);
         // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时普通出行是浪费）
         value -= self.idle_penalty(self.game.uma().vital);
@@ -618,9 +618,16 @@ impl<'a> Model<'a> {
             .map(|index| index + 1)
             .unwrap_or(1);
         let remaining_uses = (self.game.friend.out_used.len() - step + 1).max(1);
+        // 段键是固定 1–5 的字面量：直接借用查表，避免 `step.to_string()` 与整条事件深拷贝
+        // （上游 7252b84）
+        const STEP_KEYS: [&str; 5] = ["1", "2", "3", "4", "5"];
         let expected = Data::get()
             .ok()
-            .and_then(|data| data.events.friend_events.get(&step.to_string()).cloned())
+            .and_then(|data| {
+                STEP_KEYS
+                    .get(step.saturating_sub(1))
+                    .and_then(|key| data.events.friend_events.get(*key))
+            })
             .map(|event| {
                 event
                     .choices
@@ -915,9 +922,17 @@ impl<'a> Model<'a> {
     }
 
     /// 一次训练的羁绊 / 灵感 / 闪彩估值（引擎训练值不含这些，训练员侧补）
-    fn training_friendship(&self, train: usize) -> f64 {
+    ///
+    /// 参与教诲与闪彩人数由 [`preview_training_full`](MatsuriGame::preview_training_full)
+    /// 一次算好后传入（上游 7252b84：同一候选不重算）。
+    fn training_friendship(
+        &self,
+        train: usize,
+        advice: &crate::game::advice::ParticipantAdvice,
+        shining: usize,
+    ) -> f64 {
         let rules = &self.game.data.rules.friendship_gain;
-        let lesson = self.game.participant_advice(train).relationship_gain;
+        let lesson = advice.relationship_gain;
         let mut total = 0.0;
         if let Some(slot) = self.game.base.distribution.get(train) {
             for &index in slot {
@@ -949,7 +964,7 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        total += self.game.shining_count(train) as f64 * SHINING_BONUS;
+        total += shining as f64 * SHINING_BONUS;
         total
     }
 
