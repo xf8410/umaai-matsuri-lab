@@ -30,9 +30,14 @@ CARDS = [303174, 303114, 303004, 303224, 303204, 303234]
 FACTORS = {
     "labfac": ([15, 3, 0, 0, 0], [0, 30, 0, 0, 30, 30]),
     "upfac": ([18, 0, 0, 0, 0], [30, 30, 60, 80, 80, 100]),
+    # 上游 1f284f4「开局预设扫参定档」：extra_count [10,10,120,140,0,100]
+    # （它自报 +869.3 ± 56.6 / 2000 种子，压过 [30,30,60,80,80,100]）。
+    # 蓝因子跟 upfac 保持一致，好把「extra_count 单变量」干净地拆出来。
+    "up3fac": ([18, 0, 0, 0, 0], [10, 10, 120, 140, 0, 100]),
 }
 ARMS = [("pre-labfac", PRE, "labfac"), ("pre-upfac", PRE, "upfac"),
-        ("post-labfac", POST, "labfac"), ("post-upfac", POST, "upfac")]
+        ("post-labfac", POST, "labfac"), ("post-upfac", POST, "upfac"),
+        ("post-up3fac", POST, "up3fac")]
 
 SCORE_RE = re.compile(r"^评分\s+(\d+)", re.M)
 RANK_RE = re.compile(r"^评分\s+\d+\s+(\S+)", re.M)
@@ -96,6 +101,8 @@ PAIR_LABELS = {
     ("pre-labfac", "pre-upfac"): "因子增益(pre-labfac→pre-upfac)",
     ("pre-labfac", "post-upfac"): "机制+因子(pre-labfac→post-upfac)",
     ("post-labfac", "post-upfac"): "机制在上游因子下(post-upfac−post-labfac)",
+    ("post-upfac", "post-up3fac"): "extra_count 单变量(upfac→up3fac)",
+    ("post-labfac", "post-up3fac"): "本仓因子→上游新档(post-labfac→post-up3fac)",
 }
 
 
@@ -118,22 +125,34 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", default="61444-61468")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--arms", default="",
+                    help="只跑这些臂（逗号分隔）。默认全部。配对汇总按这里的顺序，"
+                         "第一个臂是 paired 的基准。")
     ap.add_argument("--out", default="/tmp/inherit_ab_results.json")
     args = ap.parse_args()
     lo, hi = (int(x) for x in args.seeds.split("-"))
     seeds = list(range(lo, hi + 1))
     if args.smoke:
         seeds = seeds[:1]
-    for tag, binary, _ in ARMS:
+    arms = ARMS
+    if args.arms:
+        want = [t.strip() for t in args.arms.split(",") if t.strip()]
+        known = {t: a for t, a in ((a[0], a) for a in ARMS)}
+        unknown = [t for t in want if t not in known]
+        if unknown:
+            print(f"未知臂：{unknown}；可选 {[a[0] for a in ARMS]}", file=sys.stderr)
+            return 2
+        arms = [known[t] for t in want]
+    for tag, binary, _ in arms:
         if not binary.exists():
             print(f"缺少二进制 {tag}: {binary}", file=sys.stderr)
             return 2
 
-    runs = {tag: [] for tag, _, _ in ARMS}
-    total = len(seeds) * len(ARMS)
+    runs = {tag: [] for tag, _, _ in arms}
+    total = len(seeds) * len(arms)
     done = 0
     for seed in seeds:
-        for tag, binary, fac in ARMS:
+        for tag, binary, fac in arms:
             rec = play(binary, fac, seed)
             runs[tag].append(rec)
             done += 1
@@ -142,7 +161,7 @@ def main() -> int:
                   f"inherit={rec.get('inherit_turns')} {rec['secs']}s", flush=True)
 
     summary = []
-    for tag, _, fac in ARMS:
+    for tag, _, fac in arms:
         rs = [r for r in runs[tag] if r["score"] > 0]
         summary.append({"tag": tag, "factors": fac, "n": len(rs),
                         "inherit_ok": sum(1 for r in rs if len(r.get("inherit_turns", [])) == 2),
@@ -156,7 +175,7 @@ def main() -> int:
                         "act_lv_mean": [mean([r["lv"][i] for r in rs if len(r["lv"]) == 5])
                                         for i in range(5)]})
     out = {"summary": summary,
-           "paired": all_pairs(runs, [tag for tag, _, _ in ARMS]),
+           "paired": all_pairs(runs, [tag for tag, _, _ in arms]),
            "runs": runs}
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf8")
     print(json.dumps({"summary": summary, "paired": out["paired"]}, ensure_ascii=False, indent=1))
