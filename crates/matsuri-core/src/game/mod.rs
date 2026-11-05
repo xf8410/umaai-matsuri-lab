@@ -142,6 +142,11 @@ pub struct MatsuriGame {
     pub deck_warnings: Vec<DeckWarning>,
     /// 最近事件记录（S8：手动 / 前端核对用；事件结算后追加，容量上限 [`EVENT_LOG_CAPACITY`]）
     pub event_log: Vec<EventRecord>,
+    /// 是否记录事件明细（搜索 rollout 置 `false`：局面跑完即弃，明细无人消费）
+    ///
+    /// 上游 7252b84 的分配削减项：`apply_event` 的明细构造含多次格式化 / 状态文本
+    /// 与事件名克隆，rollout 分支里全是白干的活。默认 `true` 保持手动面板口径不变。
+    pub record_events: bool,
     /// 当前 stage 待结算事件队列（事件选项搜索「从下一事件续跑」用；正常推进逐项消费后清空）
     pub event_queue: Vec<EventData>,
     /// 当前事件队列游标（下标 = 正在决策的事件）
@@ -214,6 +219,7 @@ impl MatsuriGame {
             finals_done: false,
             deck_warnings: Vec::new(),
             event_log: Vec::new(),
+            record_events: true,
             event_queue: Vec::new(),
             event_cursor: 0,
             event_queue_loaded: false,
