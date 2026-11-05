@@ -1187,3 +1187,145 @@ use_ucb=true、max_depth=0），不是靠权重维数。本仓现状 = GA 基因
    （新增 `crates/matsuri-core/src/search.rs` 368 行 + `[search]` scope 配置，218 测例，
    上游手写基线 81553 逐位不变 → 纯搜索覆盖增强，很可能是当前最大的分数杠杆）。
 7. 目标函数考虑从均值换成 **LG 命中率 / CVaR**：差距在尾部（A 臂 5 局 ≤LG1，C 臂 0 局）。
+
+## 9.8 真机口径对表：剧本数据层全绿（2026-11-05）
+
+上游 `umaai-project/FestaScenarioAnalyzer` 在 2026-11-04 16:02（42b50d9，晚于
+`umaai-matsuri` main 的 21b278c 13:28）发布了一版更新，其中
+`Data/master-data.json` 是用 `scripts/generate_festa_data.py` 从日服
+`master.mdb`（sha256 `4538336047066a76…`，见 `source.json`）**只读导出**的六张
+骏大祭主表：`single_mode_15_{act_info, advice, advice_effect, fusion_effect,
+act_effect, schedule}`。这是目前手上唯一的真机口径原始数据，已收进
+`lab/data/festa-master/`。
+
+新增 `scripts/check_master_data.py`，把 `data/scenario_matsuri.json` 中已被解释成
+具名字段的每一格对回原始行：
+
+| 面 | 对表格数 | 结果 |
+|---|---|---|
+| 演目 act_info（act_type / command_id / 条数） | 11 | 全一致 |
+| 発表会 schedule（turn / need_act_num / need_act_level） | 10 | 全一致（0 基 ⇄ 1 基换算后） |
+| 演目 Lv 效果 act_effect（10 级 × 7 字段 + 36 条「5 种卡」条件 + 级数） | 107 | 全一致 |
+| 教诲 advice / advice_effect（id / fusion_type / add_schedule_type + 10 种 × 10 级具名字段） | 201 | 全一致 |
+| 転成附效 fusion_effect（5 种 × 各自具名字段） | 10 | 全一致 |
+| **合计** | **339** | **0 处不符** |
+
+负控：故意把 `act_effects[Lv8].friendship` 10→9、`advice 701 Lv10.rate` 80→70、
+`schedule[1].turn` 47→46，脚本 3 格全部报出、退出码 1；还原后回到 0 处不符。
+
+三处**口径换算**（不是不一致，脚本已按此实现）：
+
+1. `schedule.turn` 是 0 基回合（引擎 `check_point_index` 直接比 `base.turn`），
+   真机 `turn_num` 是 1 基 → lab 23/47/67 ⇄ 真机 24/48/68。
+2. 演目 Lv 的 `sp_training(201) / hint_event(106) / all_hint(107) / sp_limit(109) /
+   status_limit(206)` 在真机上**全部**带 `condition_type=1 / condition_value=5`
+   （编成支援卡类型 ≥5 种才发动，66 行里 36 行），lab 由
+   `MatsuriGame::deck_has_five_types()` 承接，条件覆盖率已逐行核对。
+3. 分析器 HUD 用 `Revise(x) = x>1200 ? 2x-1200 : x` 折算显示，其 `design-qa.md`
+   记录实包回放 411 请求 / 59 次成功训练（普通 22、稽古 37、含合宿 12、属性
+   >1200 的 27 次）五围 / PT / 训练后体力全部匹配。本仓与引擎的五维始终是
+   **未减半原始坐标**（`constants.rs`：1200 以上未减半），所以这层折算不进对表。
+
+结论：**数据层不是当前的分数瓶颈**，339 格全对；调参继续在估值 / 搜索层做。
+这份夹具的价值是把「数据层不被后续调参改飘」变成一条可复跑的闸门
+（`python3 scripts/check_master_data.py`，退出码即结论）。
+
+## 9.9 种马因子 A/B：upfac Δ+1340（t=3.42、17/20）——但这是**前提**不是算法
+
+`scripts/inherit_ab.py`，两臂 CRN 配对，seeds 73621–73640（20 对），
+其余全固定生产档（N=128 / topk=4 / radical=0 / ga-r2 冠军层 / UMA 100101 /
+友人位锁 SSR 吾妻 303234 / 禁用 106301-106302）：
+
+| 臂 | `[sim] blue_count` | `[sim] extra_count` | 评分均值 | PT 均值 | LG≥6 | LG≥8 | 最高 LG |
+|---|---|---|---|---|---|---|---|
+| labfac（本仓默认） | `[15,3,0,0,0]` | `[0,30,0,0,30,30]`（合计 90） | 79662.9 | 11400.5 | 10/20 | 3/20 | LG8 |
+| upfac（上游同款） | `[18,0,0,0,0]` | `[30,30,60,80,80,100]`（合计 380） | **81002.9** | 11448.6 | **16/20** | **13/20** | **LG12** |
+
+Δ评分 **+1340.0**（sd 1753、t=**3.42**、胜 **17/20**）；ΔPT +48.0（t=0.61，不显著）；
+两臂继承都在 T30 / T54 兑现（`inherit_turns = [30,54]` ×40，3cf379d 的继承补接生效）。
+分布形态：**worst-20% Δ −824.5、best-20% Δ +3768.2** → 这是**抬天花板**的改动，
+不抬地板（尾部反而略差）。
+
+**判定：不改默认层。** `blue_count` / `extra_count` 是「父母马带多少因子」的**输入前提**，
+不是训练员可调的旋钮；upfac 的增益几乎全部来自 extra 合计 90 → 380（4.2 倍），
+把它写进 `data/ai_config.toml` 只是给 AI 换一个更有利的起点，属于自欺。
+真正的信息量是**敏感度**：种马前提从 lab 档换到上游档值 +1340 分、LG≥8 命中 3/20 → 13/20，
+量级与我们辛苦调出来的估值增益（rad0 +2621、三项修复 +6013）同一档。
+所以：**若 user 的实际父母马因子接近上游那套，则此前所有调参基线都偏悲观，
+应当以 upfac 为新基线重扫；若实际就是 lab 那套，则本行只是记录敏感度、不改任何配置。**
+待 user 拍板实际种马档，再决定要不要把基线换掉。
+
+## 9.10 算法动物园：7 种优化器同题对跑（off 保真度）
+
+`scripts/algo_zoo.py`，同一起点（ga-r2 冠军层）、同一筛选种子 73811–73822（12 局）、
+同一留出种子 73831–73850（20 局）、`RAYON_NUM_THREADS=1`，`--pop 12 --gens 15`：
+
+| 算法 | 筛选 Δ | 留出 Δ | t | 胜 | 尾部(worst-20%) | 局数 | 判定 |
+|---|---|---|---|---|---|---|---|
+| **nsga2**（均分 + 尾部双目标） | +2469.9 | **+1794.2** | **2.07** | 13/20 | 69877.8 → 71747.0 | 2344 | **本轮最优** |
+| **de**（差分进化） | +1666.0 | +1431.0 | 1.59 | 13/20 | 69877.8 → **73202.8** | 2344 | 尾部最优 |
+| es11（(1,1)-ES 自适应步长） | +1559.4 | +1367.4 | 1.95 | 11/20 | 69877.8 → 70683.8 | 1936 | 均值可用、尾部无感 |
+| mapelites（质量-多样性） | +1881.0 | +278.1 | 0.31 | 9/20 | 69877.8 → 70238.2 | 2008 | 过拟合（档案只填了 2 格） |
+| pso（粒子群） | +1575.4 | +305.1 | 0.28 | 10/20 | 69877.8 → 69047.8 | 2200 | 过拟合 |
+| spsa（首跑） | +0.0 | +0.0 | 0.00 | 0/20 | — | 572 | **实现 bug**，见下 |
+| rsm（二次响应面） | — | — | — | — | — | — | **实现 bug**，见下 |
+
+两处实现 bug 已修（`scripts/algo_zoo.py`）：
+
+1. **spsa 步长量纲错**：教科书式 `θ ← θ − a_k·g_k·Δ`，其中 `g_k=(f⁺−f⁻)/(2c_k)`
+   的量纲是「评分 / 单位空间」。41 维、评分差上万、`c_k=0.02` → |g| ≈ 1e5，
+   任何 `a_k` 都必然把参数推到 0/1 角上（实测探针点 6.7 万 vs 基线 7.6 万，
+   15 代零改善，等于白跑 572 局）。改为**按运行中 |g| 上界归一化到 [−1,1] 再乘
+   单位空间目标步长 `a_k`**（0.05 起衰减），量纲与评分尺度解耦；`c` 0.02→0.01。
+2. **rsm 代理极值崩**：`surrogate_argmax` 调 `rng.gauss(0.5, 0.25, d)`——`rng` 是
+   `random.Random`，没有第三个参数 → `TypeError`，整轮跑完 de/es11/nsga2/mapelites
+   之后在最后一个算法上崩掉。顺带把「4000 个随机点撒盒」换成**逐维解析取极**
+   （代理面无交叉项、可分离：`cᵢ<0` 取顶点 `clip(−bᵢ/2cᵢ)`，`cᵢ≥0` 取较大盒端点）
+   + 64 个随机点兜底；合成用例验证能精确还原已知顶点。
+
+结论：**在 off 保真度下，能稳定把均值抬过 t=2 的只有 nsga2**，de 的价值在尾部
+（+3325，worst-20% 从 69878 → 73203），es11 居中；pso / mapelites 是典型的
+「筛选集涨、留出集不涨」。所有数字都还是 off 档，**能不能采信取决于 §9.11 的保真度探针**。
+
+## 9.11 事件选项搜索首跑即崩：事件队列不可重入（已修）
+
+`scripts/event_ab.py` 第一次跑就露出来：三臂里 `ev0`（事件搜索关）正常出分
+（seed 73641 → 78837 / LG4 / 55.8s），`ev32` / `ev128` 一律 **3.3s 退出、评分 0、
+事件搜索点 0**。开 `[output] log_level = "debug"` 拿到真因：
+
+```
+[DEBUG] [搜索] rollout 0..31 失败: 尚未获得教诲，不能融合
+[WARN ] [搜索][UCB] 64 次 rollout 失败，对应候选的样本数少于计划值
+错误: 候选动作 0 的全部 rollout 均失败，搜索结果不可用
+```
+
+根因是**移植时的续跑语义错**：rollout 闭包手工把当前事件队列剩下的项跑完，
+然后直接 `while sim.next() { run_stage }`。但 `Begin` 阶段的**后置工作排在事件队列
+之后**——T2 的 `acquire_advice()`、首次教诲分配 `decide_advice_assignment()`、
+研鑽预掷 `roll_kensan()`。`next()` 把阶段推到 `Distribute`，这三步在分叉局面里
+永远不跑 → `advice.acquired == false` → 第一次転成（`settle.rs:137` →
+`apply_fusion_pairs`）`bail!` → 整批 rollout 全灭 → `flat_search.rs:326` 终止整局。
+`MATSURI_EVENT_SEARCH_N=0` 时不进这条路径，所以关闭态一直是对的（也解释了
+c7b1ac9 的「关闭逐位不变」为什么能通过）。
+
+修法（`crates/matsuri-core/src/game/{mod.rs,stage.rs}` + `trainer.rs`）：把事件队列
+做成**可重入子状态机**——
+
+| 改动 | 内容 |
+|---|---|
+| `MatsuriGame::event_queue_loaded` | 新字段；「本阶段队列已装载」= 续跑判据 |
+| `load_event_queue(events)` | 装载队列 + 游标归零 + 置位 |
+| `run_event_queue_from_cursor()` | 只认游标消费，结束清空并复位 |
+| `Begin` 前置 | `derive_plan` / `forced_rest` / 疲劳・变胖判定 / `generate_events` / `queue_after_train_events` 全套 `if !event_queue_loaded`；后置（教诲授予・分配・研鑽）**不套**，续跑时必须补跑 |
+| `AfterTrain` 前置 | `take(unresolved_events)` 同样套判据——否则续跑时重新 take 到**空**队列，把剩余事件全丢掉（这个坑当时还没踩到，但同型） |
+| rollout 闭包 | 先 `sim.run_stage(...)` 续跑**当前阶段**，再 `while sim.next()` |
+
+验证：
+
+* 关闭态**逐位不变**：ga-r2 + seed 61444 + N=128/topk=4，`/tmp/matsuri-racescale`
+  与修后二进制同为 **78854 / LG4 / PT 11248**。
+* 开启态从「必现报错退出」变成跑满：seed 73641 / `EVENT_N=32` → **171 个事件搜索点**、
+  评分 75761 / US9 / PT 10760、无 WARN。
+* `cargo test --release` **187 测例全绿**（0 failed）。
+
+档位 A/B 已用修后二进制重跑（16 种子 × 3 臂，`--ns 0,32,128`）。

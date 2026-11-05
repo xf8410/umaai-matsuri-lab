@@ -90,6 +90,30 @@ def paired(a, b):
             "wins": f"{sum(1 for x in d if x > 0)}/{n}"}
 
 
+# 四臂（机制 × 因子 2×2）时的可读名；其余组合退化成 "a→b"
+PAIR_LABELS = {
+    ("pre-labfac", "post-labfac"): "机制增益(pre-labfac→post-labfac)",
+    ("pre-labfac", "pre-upfac"): "因子增益(pre-labfac→pre-upfac)",
+    ("pre-labfac", "post-upfac"): "机制+因子(pre-labfac→post-upfac)",
+    ("post-labfac", "post-upfac"): "机制在上游因子下(post-upfac−post-labfac)",
+}
+
+
+def all_pairs(runs: dict, tags: list[str]) -> dict:
+    """按 ARMS 实际存在的臂生成全部两两配对，不写死臂名。
+
+    此前把四个臂名硬编码在 paired 调用里，换 ARMS（例如只跑 labfac/upfac 两臂）
+    会在跑完 40 局之后 KeyError 崩掉、丢掉整份汇总。
+    """
+    out = {}
+    for i, a in enumerate(tags):
+        for b in tags[i + 1:]:
+            if a not in runs or b not in runs:
+                continue
+            out[PAIR_LABELS.get((a, b), f"{a}→{b}")] = paired(runs[a], runs[b])
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", default="61444-61468")
@@ -132,12 +156,7 @@ def main() -> int:
                         "act_lv_mean": [mean([r["lv"][i] for r in rs if len(r["lv"]) == 5])
                                         for i in range(5)]})
     out = {"summary": summary,
-           "paired": {
-               "机制增益(pre-labfac→post-labfac)": paired(runs["pre-labfac"], runs["post-labfac"]),
-               "因子增益(pre-labfac→pre-upfac)": paired(runs["pre-labfac"], runs["pre-upfac"]),
-               "机制+因子(pre-labfac→post-upfac)": paired(runs["pre-labfac"], runs["post-upfac"]),
-               "机制在上游因子下(post-upfac−post-labfac)": paired(runs["post-labfac"], runs["post-upfac"]),
-           },
+           "paired": all_pairs(runs, [tag for tag, _, _ in ARMS]),
            "runs": runs}
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf8")
     print(json.dumps({"summary": summary, "paired": out["paired"]}, ensure_ascii=False, indent=1))

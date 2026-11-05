@@ -1,0 +1,74 @@
+# DE (differential evolution) 冠军 — algo_zoo.py --algo de --fidelity off
+#
+# 出处：/tmp/e/zoo/de.json，2026-11-05，off 保真度（搜索关闭）
+#   screen  12 种子 73811-73822: 77691.75 vs base 76025.75  (Δ+1666.0)
+#   holdout 20 种子 73831-73850: 76632.90 vs base 75201.85  (Δ+1431.1, t=1.59, 13/20 胜)
+#   holdout tail(worst-20%):     73202.75 vs base 69877.75  (Δ+3325.0) ← 尾部改善最明显
+#   累计 2344 局
+#
+# ⚠ 待办：这是在 search-OFF 下选出来的。on 保真度是否成立取决于 fid 探针的
+#   Spearman 相关；promote 前必须用 MATSURI_NORMAL_SEARCH_N=128 复跑 holdout。
+# ⚠ t=1.59 未过 2.0 门槛，均值增益属「倾向性」；尾部增益才是主证据。
+# ⚠ overflow/endgame 段在 lab 生产口径是关掉的（§9.3 Δ+162.8 ns），这里的取值
+#   只是被 DE 当自由维度扫出来的，不代表已验证有效。
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 1.7532
+rest_vital = 45
+checkpoint_margin = 3
+act_level_target = 6
+self_race = false
+friend_outing_early = true
+status_halve_threshold = 856
+status_halve_factor = 0.5
+friend_outing_deadline = 0
+friend_outing_urgency = 108.2391
+level_step_bonus = 0.0
+status_weights = [1.4195, 0.9409, 1.7537, 0.8498, 2.5268]
+
+[trainer.weights]
+vital = 3.2802
+motivation = 35.1959
+friendship = 1.8078
+hint = 0.6921
+gauge = 53.9677
+act_level = 51.3296
+checkpoint = 755.5307
+fat = 137.1447
+friend_outing = 0.0000
+
+[trainer.advice]
+card = 1.3021
+npc = 1.0491
+train = 0.7882
+keiko = 0.7192
+level = 1.7901
+milestone = 0.3135
+status_limit = 3.2641
+assist = 14.4435
+route = 355.9649
+
+[trainer.dynamic]
+status_catchup = 1.3089
+act_catchup = 0.6211
+vital_decay = 0.4402
+vital_idle = 0.7606
+keiko_tempo = 0.6726
+
+[trainer.overflow]
+margin = 0.1574
+tilt = 0.1524
+keep = 0.0000
+
+[trainer.endgame]
+keiko = 557.6618
+scarcity = 4.0000
+level = 192.2997
+normal_penalty = 180.6967

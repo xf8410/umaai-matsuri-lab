@@ -405,11 +405,21 @@ def opt_es11(base, fidelity, pop, gens, rng, screen, log):
 
 
 def opt_spsa(base, fidelity, pop, gens, rng, screen, log):
-    """SPSA：一步只用 2 次评测拿一个随机方向导数（对称差分），a/c 按标准衰减。"""
+    """SPSA：一步只用 2 次评测拿一个随机方向导数（对称差分），a/c 按标准衰减。
+
+    步长口径（2026-11-05 修）：教科书式 `a_k·g_k` 直接乘会把参数推到 0/1 角上——
+    `g_k = (f+ − f−)/(2c_k)` 的量纲是「评分 / 单位空间」，在 41 维、评分差上万、
+    `c_k=0.02` 下 |g| 高达 1e5，任何 a_k 都必然饱和（首轮实测：探针点 6.7 万 vs
+    基线 7.6 万，15 代全部原地不动）。这里改成**先按运行中 |g| 上界归一化到
+    [−1,1]，再乘单位空间目标步长 a_k**，即每代每维最多移动 a_k，量纲与评分尺度
+    解耦。代价是丢掉梯度幅值信息（在本仓 6 种子、配对 sd≈1100 的噪声下，幅值
+    本来也基本是噪声），换来的是不会一步走死。
+    """
     th = unit(vec(base, fidelity), fidelity)
-    a, c, A, alpha, gamma = 0.6, 0.02, 4, 0.602, 0.101
+    a, c, A, alpha, gamma = 0.05, 0.01, 4, 0.602, 0.101
     best_f = evaluate(base, screen, fidelity)["fitness"]
     best = dict(base)
+    gnorm = 1.0
     for gen in range(gens):
         ak = a / (gen + 1 + A) ** alpha
         ck = c / (gen + 1) ** gamma
@@ -419,12 +429,14 @@ def opt_spsa(base, fidelity, pop, gens, rng, screen, log):
         fp = evaluate(gp, screen, fidelity)["fitness"]
         fm = evaluate(gm, screen, fidelity)["fitness"]
         grad = (fp - fm) / (2 * ck)
-        th = [min(1.0, max(0.0, x - ak * grad * dd)) for x, dd in zip(th, d)]
+        gnorm = max(gnorm, abs(grad))
+        step = ak * max(-1.0, min(1.0, grad / gnorm))
+        th = [min(1.0, max(0.0, x - step * dd)) for x, dd in zip(th, d)]
         g = ununit(th, fidelity, base)
         f = evaluate(g, screen, fidelity)["fitness"]
         if f > best_f:
             best_f, best = f, g
-        log(f"  [spsa] gen{gen} 新点 {f:.1f}（{fp:.0f}/{fm:.0f}）最优 {best_f:.1f}")
+        log(f"  [spsa] gen{gen} 新点 {f:.1f}（{fp:.0f}/{fm:.0f}）步长 {step:+.4f} 最优 {best_f:.1f}")
     return best, best_f
 
 
@@ -581,14 +593,32 @@ def fit_quad(pts, ys, d):
     return beta
 
 
-def surrogate_argmax(beta, d, rng, tries: int = 4000):
+def surrogate_argmax(beta, d, rng, tries: int = 64):
+    """二次代理 `b0 + Σ bᵢuᵢ + Σ cᵢuᵢ²` 在单位盒里的极大点。
+
+    这个面是**可分离**的（无交叉项），所以逐维解析取极即可，不必随机撒点：
+    cᵢ<0 → 顶点 clip(−bᵢ/2cᵢ)；cᵢ≥0 → 凸，取盒端点里较大的一侧。
+    再补 `tries` 个随机点做兜底（顶点全在角上时，随机点能覆盖被夹住的组合）。
+    """
     import numpy as np
-    best, bu = -1e18, None
+    b = np.asarray(beta[1:1 + d], dtype=float)
+    c = np.asarray(beta[1 + d:], dtype=float)
+
+    def val(u):
+        return float(beta[0] + b @ u + c @ (u ** 2))
+
+    u = np.empty(d)
+    for i in range(d):
+        if c[i] < 0:
+            u[i] = min(1.0, max(0.0, -b[i] / (2 * c[i])))
+        else:
+            u[i] = 1.0 if b[i] + c[i] >= 0.0 else 0.0
+    best, bu = val(u), u
     for _ in range(tries):
-        u = np.clip(rng.gauss(0.5, 0.25, d), 0, 1)
-        val = beta[0] + beta[1:1 + d] @ u + beta[1 + d:] @ (u ** 2)
-        if val > best:
-            best, bu = val, u
+        cand = np.clip(np.array([rng.gauss(0.5, 0.25) for _ in range(d)]), 0, 1)
+        v = val(cand)
+        if v > best:
+            best, bu = v, cand
     return [float(x) for x in bu]
 
 

@@ -273,17 +273,14 @@ impl MatsuriTrainer {
                 // 当前事件的这一选项
                 sim.apply_event(event, choice, &mut streams.event)?;
                 sim.event_cursor += 1;
-                // 同一 stage 的剩余事件从下一个继续（用 rollout 基策决策 / 结算）
+                sim.base.put_rule_streams(streams);
                 let fallback = MatsuriTrainer::new(sim.config.clone());
                 let mut sim_rng = StdRng::seed_from_u64(seed);
-                while sim.event_cursor < sim.event_queue.len() {
-                    let next = sim.event_queue[sim.event_cursor].clone();
-                    sim.run_event(&next, &fallback, &mut sim_rng, &mut streams.event)?;
-                    sim.event_cursor += 1;
-                }
-                sim.event_queue.clear();
-                sim.event_cursor = 0;
-                sim.base.put_rule_streams(streams);
+                // 先把**当前 stage** 从事件游标续跑完（`Begin` / `AfterTrain` 已做成可重入），
+                // 再推进到终局。不能直接 `while sim.next()`：那会跳过本阶段事件队列之后的
+                // 后置工作——T2 的 `acquire_advice` / 首次教诲分配 / 研鑽预掷都在事件之后，
+                // 跳掉就会在第一次転成时 `bail!("尚未获得教诲，不能融合")`，整批 rollout 全灭。
+                sim.run_stage(&fallback, &mut sim_rng)?;
                 while sim.next() {
                     sim.run_stage(&fallback, &mut sim_rng)?;
                 }

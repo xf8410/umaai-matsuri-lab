@@ -146,6 +146,12 @@ pub struct MatsuriGame {
     pub event_queue: Vec<EventData>,
     /// 当前事件队列游标（下标 = 正在决策的事件）
     pub event_cursor: usize,
+    /// 事件队列是否已装载（`Begin` / `AfterTrain` 阶段可重入的判据）
+    ///
+    /// 事件选项搜索在队列消费**中途**分叉：分叉局面带着 `loaded = true` 与非零游标，
+    /// 续跑 `run_stage` 时据此跳过「结构派生 / 事件生成 / `take(unresolved_events)`」，
+    /// 只从游标继续，然后补跑阶段后置（T2 授予教诲、研鑽预掷）。
+    pub event_queue_loaded: bool,
     /// 助力支撑剩余次数（0 = 无；演目稽古获得「助力の支え」时重置为规则上限，S5）
     pub assist_support_left: i32,
     /// 本回合研鑽「追加の稽古」是否掷中（`Begin` 用策略流预掷；本回合未点对应训练则作废）
@@ -210,6 +216,7 @@ impl MatsuriGame {
             event_log: Vec::new(),
             event_queue: Vec::new(),
             event_cursor: 0,
+            event_queue_loaded: false,
             assist_support_left: 0,
             kensan_pending: false,
             train_level_bonus: [0; 5],
