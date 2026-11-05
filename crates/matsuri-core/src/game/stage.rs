@@ -379,7 +379,14 @@ impl MatsuriGame {
         event_rng: &mut EventRng,
     ) -> Result<()> {
         while self.event_cursor < self.event_queue.len() {
-            let event = self.event_queue[self.event_cursor].clone();
+            // 取走当前槽（留 `Default` 占位）：事件深拷贝（name + choices 嵌套 Vec）
+            // 只在这里发生一次，而不是每事件一次（上游 7252b84）。
+            //
+            // 与本仓的可重入 / 事件搜索口径相容：`search_event` 的两处
+            // `event_queue.get(cursor).is_none()` 判据都在 `run_event` **之内**（即本槽
+            // 尚未被取走）求值，rollout 分叉克隆到的也是完整的槽；分叉里先就地结算
+            // 当前选项、`cursor += 1`，再回到本函数从下一个槽续跑——被取走的槽不会再被读。
+            let event = std::mem::take(&mut self.event_queue[self.event_cursor]);
             self.run_event(&event, trainer, decision, event_rng)?;
             self.event_cursor += 1;
         }
