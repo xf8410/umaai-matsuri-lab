@@ -8,7 +8,8 @@
 
 use anyhow::{Result, anyhow};
 use rand::rngs::StdRng;
-use umaai_core::rng::{StrategyRng, StreamTag, derive_seed};
+use umaai_core::gamedata::EventData;
+use umaai_core::rng::{EventRng, StrategyRng, StreamTag, derive_seed};
 use umasim::game::base::RuleStreams;
 use umasim::game::{Game, StageId, Trainer};
 
@@ -276,9 +277,7 @@ impl MatsuriGame {
                 let mut events = self.generate_events(&mut streams.event);
                 self.append_begin_friend_event(&mut events);
                 self.queue_after_train_events();
-                for event in &events {
-                    self.run_event(event, trainer, decision, &mut streams.event)?;
-                }
+                self.run_event_queue(events, trainer, decision, &mut streams.event)?;
                 // turn 2：NPC / 友人加入（本回合起可用）后立即授予 5 个基础教诲；
                 // 教诲效果须从本回合的分布 / 训练起生效（memo §4）。
                 if self.base.turn == crate::SCENARIO_START_TURN {
@@ -310,9 +309,7 @@ impl MatsuriGame {
                 // 本回合动作与训练后处理挂出的事件统一在这里结算：
                 // 比赛奖励 / 出行 / 红点 / 友人点击 / 加练 / 失败事件等。
                 let after_events = std::mem::take(&mut self.unresolved_events);
-                for event in &after_events {
-                    self.run_event(event, trainer, decision, &mut streams.event)?;
-                }
+                self.run_event_queue(after_events, trainer, decision, &mut streams.event)?;
             }
             Stage::End => {
                 // 合宿计数：比赛 / 强制休息回合不计入，计满窗口长度后本次合宿结束。
@@ -344,6 +341,30 @@ impl MatsuriGame {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 逐项结算一批事件；队列与游标**留在局面上**（结算完清空）
+    ///
+    /// 事件选项搜索的 fork 会带着 `event_queue` / `event_cursor` 一起克隆：应用当前选项后
+    /// 从下一个事件继续，避免「应用完直接跳到下一 stage、漏掉同 stage 剩余事件」。
+    /// 正常推进路径与逐事件 `run_event` 完全等价（同序、同随机流消费）。
+    pub(crate) fn run_event_queue<T: Trainer<Self>>(
+        &mut self,
+        events: Vec<EventData>,
+        trainer: &T,
+        decision: &mut StdRng,
+        event_rng: &mut EventRng,
+    ) -> Result<()> {
+        self.event_queue = events;
+        self.event_cursor = 0;
+        while self.event_cursor < self.event_queue.len() {
+            let event = self.event_queue[self.event_cursor].clone();
+            self.run_event(&event, trainer, decision, event_rng)?;
+            self.event_cursor += 1;
+        }
+        self.event_queue.clear();
+        self.event_cursor = 0;
         Ok(())
     }
 }

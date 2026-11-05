@@ -15,7 +15,7 @@ use rand::rngs::StdRng;
 use umaai_core::Ill;
 use umaai_core::gamedata::{EventChoice, EventData};
 use umasim::game::{Game, Trainer};
-use umasim::search::{FlatSearch, NoTerminal, SearchConfig};
+use umasim::search::{FlatSearch, FlatSearchGame, NoTerminal, SearchConfig};
 
 use crate::config::MatsuriConfig;
 use crate::diag;
@@ -50,6 +50,12 @@ pub struct MatsuriTrainer {
     normal_search: Option<SearchConfig>,
     /// 常规前瞻的候选剪枝宽度（按贪心 `action_value` 排序后只搜前 K 个动作）
     normal_search_topk: usize,
+    /// 事件选项决策点的前瞻搜索配置（上游 21b278c 的第四路；`None` = 走静态期望值打分）
+    ///
+    /// 事件选项不是 `Action`：用 dummy token 走 `FlatSearch::search_with` 复用同一套
+    /// UCB / CRN，闭包内 fork → 应用当前选项 → 从 `event_queue` 的下一个事件续跑 →
+    /// 再把后续 stage 跑到终局。rollout 基策同样 `None`（防递归）。
+    event_search: Option<SearchConfig>,
 }
 
 impl MatsuriTrainer {
@@ -63,6 +69,7 @@ impl MatsuriTrainer {
             camp_search_topk: 4,
             normal_search: None,
             normal_search_topk: 4,
+            event_search: None,
         }
     }
 
@@ -87,6 +94,16 @@ impl MatsuriTrainer {
     pub fn with_normal_search(mut self, search: SearchConfig, topk: usize) -> Self {
         self.normal_search = (search.search_n > 0).then_some(search);
         self.normal_search_topk = topk.max(1);
+        self
+    }
+
+    /// 打开事件选项决策点的前瞻蒙特卡洛搜索（`search_n = 0` 视为关闭）
+    ///
+    /// 事件选项一般只有 2–3 个，全部进搜索（不剪枝）；超过 [`EVENT_MAX_CHOICES`] 的
+    /// 异常事件退回静态打分，避免候选爆炸。
+    #[must_use]
+    pub fn with_event_search(mut self, search: SearchConfig) -> Self {
+        self.event_search = (search.search_n > 0).then_some(search);
         self
     }
 
@@ -219,6 +236,94 @@ impl MatsuriTrainer {
         search: &SearchConfig,
     ) -> Result<Option<(usize, f64)>> {
         self.mc_pick(game, actions, scored, search, self.normal_search_topk, "常规前瞻")
+    }
+
+    /// 事件选项的蒙特卡洛前瞻（上游 21b278c 第四路）
+    ///
+    /// 与 `mc_pick` 的差别：候选不是 `Action` 而是「选项下标」，所以不能走
+    /// `apply_root_action`——改用 `search_with` 自己接管 rollout：fork → 应用当前选项 →
+    /// **从 `event_queue` 的下一个事件续跑**（否则会漏掉同 stage 剩余事件）→ 跑完后续
+    /// stage 到终局 → `search_score`。事件流只在闭包里取用，不碰调用方的决策流。
+    fn search_event(
+        &self,
+        game: &MatsuriGame,
+        event: &EventData,
+        choices: &[Vec<EventChoice>],
+        rng: &mut StdRng,
+        search: &SearchConfig,
+    ) -> Result<Option<usize>> {
+        if game.event_queue.get(game.event_cursor).is_none() {
+            // 不在事件队列上下文里（例如宿主直接调 select_event_choice）：无法续跑，退回静态打分
+            return Ok(None);
+        }
+        let tokens: Vec<Action> = (0..choices.len()).map(event_token).collect();
+        let pt = self.config.trainer.pt_favor_rate;
+        let searcher = FlatSearch::<MatsuriGame>::new(search.clone())
+            .with_rollout_trainer(MatsuriTrainer::new(self.config.clone()))
+            .with_parallel(true);
+        let out = {
+            let _quiet = umaai_core::diag::DiagGuard::suppress();
+            searcher.search_with(game, &tokens, rng, |g, token, seed| {
+                let choice = choice_of_token(token)?;
+                let mut sim = g.fork_for_rollout(seed);
+                if sim.event_queue.get(sim.event_cursor).is_none() {
+                    bail!("事件搜索缺少事件队列游标");
+                }
+                let mut streams = sim.base.take_rule_streams()?;
+                // 当前事件的这一选项
+                sim.apply_event(event, choice, &mut streams.event)?;
+                sim.event_cursor += 1;
+                // 同一 stage 的剩余事件从下一个继续（用 rollout 基策决策 / 结算）
+                let fallback = MatsuriTrainer::new(sim.config.clone());
+                let mut sim_rng = StdRng::seed_from_u64(seed);
+                while sim.event_cursor < sim.event_queue.len() {
+                    let next = sim.event_queue[sim.event_cursor].clone();
+                    sim.run_event(&next, &fallback, &mut sim_rng, &mut streams.event)?;
+                    sim.event_cursor += 1;
+                }
+                sim.event_queue.clear();
+                sim.event_cursor = 0;
+                sim.base.put_rule_streams(streams);
+                while sim.next() {
+                    sim.run_stage(&fallback, &mut sim_rng)?;
+                }
+                sim.on_simulation_end(&fallback, &mut sim_rng)?;
+                sim.search_score(pt)
+            })?
+        };
+        let picked = out.best_action_idx;
+        diag!(
+            "【搜索】T{} 事件#{} {} 选项{} 个 × {} 次 → 中选第 {} 项 值={:.1}",
+            game.turn(),
+            event.id,
+            event.name,
+            choices.len(),
+            search.search_n,
+            picked,
+            out.action_results[picked].weighted_mean(out.radical_factor)
+        );
+        Ok(Some(choice_of_token(&tokens[picked])?))
+    }
+}
+
+/// 事件选项搜索的 dummy token 上限（选项数超过它就退回静态打分，避免候选爆炸）
+const EVENT_MAX_CHOICES: usize = 10;
+
+/// dummy action token：0–4 用 `Train`，5–9 用 `ActTrain`（仅作候选标识，不会被执行）
+fn event_token(index: usize) -> Action {
+    if index < 5 {
+        Action::Train(index as u8)
+    } else {
+        Action::ActTrain((index - 5) as u8)
+    }
+}
+
+/// token → 事件选项下标
+fn choice_of_token(token: &Action) -> Result<usize> {
+    match token {
+        Action::Train(index) => Ok(usize::from(*index)),
+        Action::ActTrain(index) => Ok(usize::from(*index) + 5),
+        other => bail!("事件搜索 token 非法：{other}"),
     }
 }
 
@@ -463,7 +568,7 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
         game: &MatsuriGame,
         event: &EventData,
         choices: &[Vec<EventChoice>],
-        _rng: &mut StdRng,
+        rng: &mut StdRng,
     ) -> Result<usize> {
         if choices.is_empty() {
             return Ok(0);
@@ -480,6 +585,13 @@ impl Trainer<MatsuriGame> for MatsuriTrainer {
                 best_value = value;
                 best = index;
             }
+        }
+        // 事件前瞻：中选口径换成搜索到的终局期望，静态分只负责「搜不动时」的兜底
+        if choices.len() <= EVENT_MAX_CHOICES
+            && let Some(search) = self.event_search.as_ref()
+            && let Some(index) = self.search_event(game, event, choices, rng, search)?
+        {
+            best = index;
         }
         diag!(
             "【决策】T{} 事件#{} {} 选项{} 期望={:.1}",

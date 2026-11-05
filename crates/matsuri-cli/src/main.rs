@@ -119,10 +119,19 @@ fn run() -> Result<()> {
                 .unwrap_or(4);
             let mut normal_search = cfg.search.clone();
             normal_search.search_n = normal_search_n;
+            // 事件选项前瞻（上游 21b278c 第四路）：事件多、每个只有 2–3 个选项，
+            // 成本量级与常规前瞻相当，独立开关便于单独 A/B
+            let event_search_n: usize = std::env::var("MATSURI_EVENT_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let mut event_search = cfg.search.clone();
+            event_search.search_n = event_search_n;
             let trainer = MatsuriTrainer::new(matsuri_cfg)
                 .with_search(search, topk)
                 .with_camp_search(camp_search, camp_topk)
-                .with_normal_search(normal_search, normal_topk);
+                .with_normal_search(normal_search, normal_topk)
+                .with_event_search(event_search);
             runner.run_game(game, &trainer, None)?;
         }
         "random" => {

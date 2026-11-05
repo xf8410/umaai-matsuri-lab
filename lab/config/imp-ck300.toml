@@ -1,0 +1,101 @@
+# 跨仓导入冠军（2026-11-04 并行会话 · 上游云克隆仓 21b278c，300 局三块独立种子裁决）
+# 来源：交付包《umaai-matsuri_源码_迭代记录_思考过程_完整包_20261104.zip》
+#   迭代记录/本轮实验/champion_matsuri_config.toml + 迭代记录.md §4
+# 原始证据：E 块 +850(t=2.6) / H 独立块 +1329(t=4.2) / K 独立块 +896(t=3.2)，
+#   三块合并 300 局 Δ**+1025.0**（t=5.75）；基线均值 77403.4（无搜索手写档）。
+# 本仓不直接用它——上游 TrainerConfig 没有 lab 的 [fusion] / status_halve_* /
+#   friend_outing* 三组键，直接覆盖会丢 lab 机制。这里按 ga-r2 冠军层**只搬 4 处差异**：
+#   ①weights.checkpoint 1105.0179 → 300.0（主因：発表会/本番达标保护过重，历史 GA 从未向下探索）
+#   ②weights.motivation 23.6572 → 37.4291
+#   ③trainer.pt_favor_rate 1.7271 → 1.9815
+#   ④[trainer.overflow] margin/tilt/keep = 0.08/2.0/0.5（比上游扫描档 0.02/0.5/0.15 更激进）
+#      + [trainer.endgame] 250/1/80/120
+# 同轮死代码清单（改了逐位不变，本仓需自证）：advice.milestone / advice.keiko /
+#   dynamic.vital_idle / advice.status_limit / advice.assist / checkpoint_margin /
+#   act_level_target / free_race_urgency / advice.route>500
+# 过拟合警示：E 块最高分复杂组合在独立 H 块 −293.7 判负 → 单旋钮最简方案 holdout 更强。
+#   因此本仓按 ①→①②③→①②③④ 三档拆开验证，不整包采纳。
+
+# 轮次 8 冠军档（ga-r2）：在 route-prior.toml（轮次 7）之上再跑一轮 GA（31 基因，
+# 训练 seeds 62000–62029，留出 62100–62199 全程未用），并叠加本轮两项实机口径修正。
+#
+# ── GA 第二轮（相对轮次 7 的主要动作）──
+#   pt_favor_rate 2.32→1.73、weights.act_level 50.0→13.0、motivation 31.3→23.7、
+#   hint 0.66→1.17、status_weights[耐]1.26→0.99 / [根]0.43→0.30、act_level_target 10→9、
+#   keiko_tempo 0.85→0.49、vital_decay 0.20→0.29；advice.route 稳在 500（先验未被关闭）。
+#   留出集 100 局：74051.7 vs 起点 72784.0，配对 Δ+1267.7（t=3.57，66/100）。
+#
+# ── 本轮新增：属性收益「减半」的实机口径折算（status_halve_*）──
+#   模拟器五维是**非减半**累积（raw），实机面板 = 1200+(raw-1200)/2（raw>1200）；
+#   评分表 five_status_final_score 是 raw 索引的凸表。实机对「超面板 1200 的单次入账」
+#   先按上限截断、再减半。决策打分据此把预览收益折算成**有效入账**（value.rs
+#   effective_status_gain：raw 坐标截断 + 超 1200 部分 ×0.5），再走非减半凸表换算回评分点
+#   （= 「换算回来」）。阈值 1200 在 raw / 面板两坐标同值（该点 raw=面板），无需面板换算。
+#   校验：本档 speed raw 上限 3179 ↔ 面板 2189、wisdom raw 2400 ↔ 面板 1800，与实机截图一致。
+#   50 局配对（seeds 62700–62749，无搜索、route 先验恒定）：
+#     减半 ON vs OFF —— 实机面板评分 Δ+253.2（t=0.86，29/50）、PT Δ+131.9（t=1.98，31/50）、
+#     五维面板合计 −5.7（持平）。增益主要经 PT 兑现（训练贴上限的维收益被正确判低 →
+#     回合让给 PT 产出更高的动作）。方向为正、不损害，且更贴近实机，故默认开启。
+#     注：冠军权重是在「减半 OFF」下 GA 调出的；以减半 ON 重跑 GA 是后续项。
+#
+# ── 本轮新增：友人外出可调权重 + 截止 + 逐回合推敲（friend_outing*）──
+#   weights.friend_outing 取代写死的尽早用完加分（原 const 120），可扫参。
+#   friend_outing_deadline=0 → 自动取 Senior 合宿起点（camp.windows[2].start = T60 ≈ 第三年 10 月上）；
+#   trainer.rs 守门③按截止回合数强约束：剩余段数 > 可用回合（×0.82）时强制友人出行。
+#   friend_outing_urgency=0：截止急迫加分**关闭**——实测 50 局友人 5 段均在 ~T22 前自然用完
+#   （gate_friend 命中 0，守门从未触发），急迫项冗余；urgency=100 反而略降（面板评分 −71 vs 0）。
+#   逐回合推敲（value.rs friend_outing_deliberation_value，随体力调节外出加分）已编入，恒生效。
+#   局限：模拟器**不建模粉丝**（data.rs / settle.rs 明确），故「粉丝是否达标」无法纳入推敲。
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 1.7271
+rest_vital = 64
+checkpoint_margin = 5
+act_level_target = 9
+self_race = false
+friend_outing_early = true
+# 属性收益减半：raw 超 1200 的单次入账 ×0.5（实机口径），再走非减半凸表换算回评分点
+status_halve_threshold = 1200
+status_halve_factor = 0.5
+# 友人外出截止（0 = 自动取 Senior 合宿起点 T60 ≈ 第三年 10 月上）
+friend_outing_deadline = 0
+# 截止急迫加分（0 = 关闭；实测友人段自然早用完，急迫冗余且 100 略有害）
+friend_outing_urgency = 0.0
+status_weights = [0.6465, 0.9881, 0.8387, 0.3000, 2.6217]
+
+[trainer.weights]
+vital = 1.4774
+motivation = 23.6572
+friendship = 0.5559
+hint = 1.1725
+gauge = 27.9217
+act_level = 12.9562
+checkpoint = 300.0
+fat = 108.4909
+# 友人外出每段基础价值（取代写死加分，可扫参）
+friend_outing = 120.0
+
+[trainer.advice]
+card = 1.4462
+npc = 0.4246
+train = 0.2000
+keiko = 0.7630
+level = 0.2000
+milestone = 0.2000
+status_limit = 0.0000
+assist = 0.0000
+route = 500.0000
+
+[trainer.dynamic]
+status_catchup = 1.3553
+act_catchup = 0.0000
+vital_decay = 0.2879
+vital_idle = 0.0000
+keiko_tempo = 0.4860
