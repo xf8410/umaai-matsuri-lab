@@ -303,7 +303,11 @@ impl MatsuriGame {
             .iter()
             .map(|assign| super::Action::AssignAdvice(*assign))
             .collect();
-        let index = trainer.select_action(self, &actions, decision)?;
+        // 实验室钉位钩子优先：命中就不问 Trainer（不消耗决策流，回放仍可复现）
+        let index = match self.pinned_assignment(&candidates) {
+            Some(index) => index,
+            None => trainer.select_action(self, &actions, decision)?,
+        };
         let Some(super::Action::AssignAdvice(assign)) = actions.get(index) else {
             bail!("教诲分配决策返回了下标 {index}，但候选不是分配方案");
         };
@@ -313,6 +317,108 @@ impl MatsuriGame {
             assign.slots().map(|slot| slot.to_string()).join("")
         );
         self.apply_assignment(assign)
+    }
+
+    /// 实验室钩子：`MATSURI_ASSIGN_PIN` 钉死某个教诲窗口的落位（buff 位置穷举矩阵用）
+    ///
+    /// 格式 `<窗口下标>:<方案>`，逗号分隔多个窗口；`<方案>` 四种写法：
+    ///   - **buff id 串** `<id0>-<id1>-<id2>-<id3>-<id4>`（演目序 速/耐/力/根/智）：
+    ///     每个位置写想要的 buff id（基础 101–501 或已转生 601–1001），`0` = 该位置不限。
+    ///     命中判据是 `apply_assignment` **落地后**的 `(slots, fused)`，所以硬约束
+    ///     （801 分身会被换到担当最多的演目）已经生效，写路线时不用自己反推排列。
+    ///   - 5 位排列串（如 `41320`，= `AdviceAssignment` 的 Display）
+    ///   - 候选下标 `0`–`119`（`assignment_candidates` 的全排列序）
+    ///   - `d<N>`：**第 N 个互异落位**（按 `apply_assignment` 落地后的 `(slots, fused)` 去重）
+    ///
+    /// 窗口下标 = `data.advice_windows` 下标（turn 2/11/23/35/47/59 → 0..5）。
+    /// 未设置 / 不命中本窗口 / 解析失败 → `None`，走 Trainer 正常决策。
+    fn pinned_assignment(&self, candidates: &[AdviceAssignment]) -> Option<usize> {
+        let spec = std::env::var("MATSURI_ASSIGN_PIN").ok()?;
+        let window = self.plan.advice_window?;
+        for entry in spec.split(',') {
+            let (key, value) = entry.trim().split_once(':')?;
+            if key.trim().parse::<usize>().ok()? != window {
+                continue;
+            }
+            let value = value.trim();
+            let hit = if let Some(rank) = value.strip_prefix('d') {
+                self.distinct_assignments(candidates)
+                    .get(rank.parse::<usize>().ok()?)
+                    .copied()
+            } else if value.contains('-') {
+                self.assignment_by_buff_ids(candidates, value)
+            } else if value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit()) {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.to_string() == value)
+            } else {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&index| index < candidates.len())
+            };
+            let index = hit?;
+            diag!(
+                "【教诲】T{} 钉位 窗口{} 方案 {} → 候选{}（MATSURI_ASSIGN_PIN）",
+                self.turn(),
+                window,
+                value,
+                index
+            );
+            return Some(index);
+        }
+        None
+    }
+
+    /// 按 buff id 串找落位：`<id0>-<id1>-<id2>-<id3>-<id4>`（演目序 速/耐/力/根/智，`0`=不限）
+    ///
+    /// 判据是**落地后**的 `(slots, fused)`：某演目命中 = `slots[act] == id || fused[act] == id`。
+    /// 这样写攻略路线时可以直接说「速度放分身(801)」，不必自己反推是哪个排列，
+    /// 因为 `enforce_advice_constraints` 的硬约束交换已经在探针里生效了。
+    /// 找不到匹配 → `None`（整个窗口退回 Trainer 正常决策，而不是静默钉错位置）。
+    fn assignment_by_buff_ids(
+        &self,
+        candidates: &[AdviceAssignment],
+        value: &str,
+    ) -> Option<usize> {
+        let want: Vec<i32> = value
+            .split('-')
+            .map(|part| part.trim().parse::<i32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        if want.len() != 5 {
+            return None;
+        }
+        let _quiet = umaai_core::diag::DiagGuard::suppress();
+        candidates.iter().position(|candidate| {
+            let mut probe = self.clone();
+            probe.apply_assignment(candidate).is_ok()
+                && (0..5).all(|act| {
+                    want[act] == 0
+                        || probe.advice.slots[act] == want[act]
+                        || probe.advice.fused[act] == want[act]
+                })
+        })
+    }
+
+    /// 互异落位表：120 个排列按「落地后的 `(slots, fused)`」去重，保留首个下标
+    ///
+    /// turn 47 起 `fused` 里有 801，`enforce_advice_constraints` 会把它钉到担当最多的演目，
+    /// 于是 120 个排列塌成 4! = 24 个互异结果。位置穷举矩阵按这张表扫，才扫得动。
+    fn distinct_assignments(&self, candidates: &[AdviceAssignment]) -> Vec<usize> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        // 探针会真落地一次分配（含硬约束交换的 diag），全静默，别把日志刷成 120 行
+        let _quiet = umaai_core::diag::DiagGuard::suppress();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let mut probe = self.clone();
+            if probe.apply_assignment(candidate).is_err() {
+                continue;
+            }
+            if seen.insert((probe.advice.slots, probe.advice.fused)) {
+                out.push(index);
+            }
+        }
+        out
     }
 
     /// 找「研鑽（701）」当前所在演目（至多一个）

@@ -1,0 +1,227 @@
+# 骏大祭手写训练员 · 矩阵跑局（按需触发，硬上限 100 局）
+#
+# 只在本仓跑（xf8410/umaai-matsuri-lab），不碰上游。手动触发：
+#   Actions → 矩阵跑局 → Run workflow
+#
+# 采集口径（scripts/matrix.py）：评分 / 档次 / 五维分列 + 合计 / PT / 稽古设施（演目）Lv 与上限 /
+# 守门链逐条命中 / 教诲融合（buff 替换）明细 / 助力支撑获得与消耗 / 追加稽古掷中·兑现·作废。
+# 每局终局块原文留档进 artifact —— 解析式若失配，改解析器重算即可，不必重跑 100 局。
+#
+# 卡组留空 = 用 data/ai_config.toml 的默认参考卡组
+# （2速1耐1力1智1友人 = 303174 303114 303004 303224 303204 + 友人 SSR 吾妻 303234）。
+name: 矩阵跑局
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "局数（硬上限 100）"
+        default: "100"
+      start_seed:
+        description: "起始种子（第 i 局 = start + i）"
+        default: "61444"
+      cards:
+        description: "卡组（逗号分隔，留空=用 data/ai_config.toml 默认）"
+        default: ""
+      uma:
+        description: "育成马 gameId（留空=用 data/ai_config.toml 默认；106301/106302 已禁用）"
+        default: ""
+      shield:
+        description: "MATSURI_SHIELD 精神防护（心情盾）层数，0=不注入"
+        default: "0"
+      illguard:
+        description: "MATSURI_ILLGUARD 恢复精神（不良状态盾）层数，0=不注入"
+        default: "0"
+      pin_window:
+        description: "钉位穷举：教诲窗口下标 0-5（turn 2/11/23/35/47/59）；-1 = 不钉位跑基线"
+        default: "-1"
+      pin_positions:
+        description: "钉位穷举的互异落位数；0 = 自动（窗口 4/5 = 24，其余 = 120）"
+        default: "0"
+      pin_reps:
+        description: "每个落位重复几个种子（总数仍受 100 局硬上限）"
+        default: "1"
+      pin_route:
+        description: "钉整条教示路线：<窗口>:<id0>-<id1>-<id2>-<id3>-<id4>[,…]（id 为 buff id，0=该位不限）"
+        default: ""
+      config_overlay:
+        description: "剧本配置覆盖层路径；填 none = 用仓内默认层 data/matsuri_config.toml"
+        default: "lab/config/matsuri_config.toml"
+  # 备用触发口：workflow_dispatch 只在默认分支存在该文件时才会出现在 UI 里，
+  # 而本 workflow 只活在 lab/* 与 exp/* 分支上。推一根 exp/matrix/* 杈即可强制起一局矩阵。
+  push:
+    branches: ["exp/matrix/**"]
+
+concurrency:
+  group: matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout engine repo (lab/ill-guard)
+        uses: actions/checkout@v4
+        with:
+          repository: xf8410/umaai-next
+          ref: lab/ill-guard
+          path: umaai_next
+          token: ${{ secrets.ENGINE_REPO_TOKEN || github.token }}
+
+      - name: Link engine as sibling
+        run: |
+          ln -s "$GITHUB_WORKSPACE/umaai_next" "$GITHUB_WORKSPACE/../umaai_next"
+          test -f ../umaai_next/crates/umasim/Cargo.toml || { echo "引擎并列目录缺失"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          shared-key: matsuri-lab
+
+      - name: Build release bin
+        run: cargo build --release --bin matsuri
+
+      # 覆盖层只落在运行目录（CWD），仓内默认层 data/matsuri_config.toml 保持上游原样 ——
+      # 默认层被 config.rs 的测试契约性钉死为 MatsuriConfig::default()，改它必红。
+      - name: 应用剧本配置覆盖层
+        env:
+          OVERLAY: ${{ github.event.inputs.config_overlay || 'lab/config/matsuri_config.toml' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/matrix
+          if [ -z "${OVERLAY:-}" ] || [ "$OVERLAY" = none ]; then
+            echo "覆盖层 = none → 用仓内默认层 data/matsuri_config.toml" | tee artifacts/matrix/config_overlay.txt
+            exit 0
+          fi
+          test -f "$OVERLAY" || { echo "覆盖层不存在: $OVERLAY"; exit 1; }
+          # 覆盖层坏掉时要在跑 100 局之前就炸，而不是 parsed=0 之后才发现
+          python3 - "$OVERLAY" <<'PY'
+          import sys, tomllib
+          path = sys.argv[1]
+          with open(path, "rb") as fh:
+              cfg = tomllib.load(fh)
+          assert "fusion" in cfg, f"{path} 缺 [fusion]（整段替换语义要求覆盖层自带）"
+          trainer = cfg.get("trainer")
+          assert isinstance(trainer, dict), f"{path} 缺 [trainer]（给了就整段替换，必须给全每个键）"
+          need = {"pt_favor_rate", "rest_vital", "checkpoint_margin", "act_level_target",
+                  "self_race", "friend_outing_early", "status_weights", "weights", "advice"}
+          missing = need - set(trainer)
+          assert not missing, f"{path} [trainer] 缺键: {sorted(missing)}"
+          print(f"覆盖层校验通过: {path}（dynamic = {trainer.get('dynamic', {})}）")
+          PY
+          cp "$OVERLAY" ./matsuri_config.toml
+          { echo "覆盖层: $OVERLAY"; echo "---"; cat "$OVERLAY"; } | tee artifacts/matrix/config_overlay.txt
+
+      - name: 复现锚点（单局 seed 61444）
+        env:
+          MATRIX_CARDS: ${{ github.event.inputs.cards }}
+          MATRIX_UMA: ${{ github.event.inputs.uma }}
+        run: |
+          set -euo pipefail
+          # 锚点用与矩阵相同的卡组 / 育成马，否则卡组或马 id 写错了要到 100 局全 fail 才发现
+          {
+            printf '[sim]\nseed = 61444\n'
+            if [ -n "${MATRIX_CARDS:-}" ]; then
+              printf 'cards = [%s]\n' "$(echo "$MATRIX_CARDS" | tr ',' '\n' | sed 's/[[:space:]]//g' | paste -sd, -)"
+            fi
+            [ -n "${MATRIX_UMA:-}" ] && printf 'uma = %s\n' "$MATRIX_UMA"
+            true
+          } > ai_config.toml
+          echo "--- 锚点覆盖层 ---"; cat ai_config.toml
+          ./target/release/matsuri matsuri 2>&1 | tee artifacts/matrix/anchor.log | tail -20
+          # 锚点局必须真跑出终局块；配置 / 数据坏了就在这里拦住，别浪费 100 局
+          grep -qE "^评分[[:space:]]+[0-9]+" artifacts/matrix/anchor.log \
+            || { echo "锚点局没有产出终局评分块，配置或数据有问题"; tail -30 artifacts/matrix/anchor.log; exit 1; }
+          grep -E "^(育成ウマ娘|赛马娘|评分)" artifacts/matrix/anchor.log || true
+          rm -f ai_config.toml
+
+      - name: 跑矩阵
+        env:
+          # 层数 0 = 注入 0 层 = 与不注入等价（开局钩子只是把计数写成 0），无需特判
+          MATSURI_SHIELD: ${{ github.event.inputs.shield || '0' }}
+          MATSURI_ILLGUARD: ${{ github.event.inputs.illguard || '0' }}
+          MATRIX_CARDS: ${{ github.event.inputs.cards }}
+          MATRIX_UMA: ${{ github.event.inputs.uma }}
+          PIN_WINDOW: ${{ github.event.inputs.pin_window || '-1' }}
+          PIN_POSITIONS: ${{ github.event.inputs.pin_positions || '0' }}
+          PIN_REPS: ${{ github.event.inputs.pin_reps || '1' }}
+          PIN_ROUTE: ${{ github.event.inputs.pin_route }}
+        run: |
+          set -euo pipefail
+          COUNT="${{ github.event.inputs.count || '100' }}"
+          if [ "$COUNT" -gt 100 ]; then
+            echo "局数 $COUNT 超过硬上限，截到 100"
+            COUNT=100
+          fi
+          ARGS=(--count "$COUNT"
+                --start-seed "${{ github.event.inputs.start_seed || '61444' }}"
+                --out artifacts/matrix)
+          if [ -n "${MATRIX_CARDS:-}" ]; then
+            ARGS+=(--cards "$MATRIX_CARDS")
+          fi
+          if [ -n "${MATRIX_UMA:-}" ]; then
+            ARGS+=(--uma "$MATRIX_UMA")
+            echo "育成马: $MATRIX_UMA"
+          fi
+          if [ -n "${PIN_ROUTE:-}" ]; then
+            ARGS+=(--pin-route "$PIN_ROUTE")
+            echo "教示路线钉位: $PIN_ROUTE"
+          fi
+          if [ "${PIN_WINDOW:--1}" != "-1" ]; then
+            ARGS+=(--pin-window "$PIN_WINDOW"
+                   --pin-positions "$PIN_POSITIONS"
+                   --pin-reps "$PIN_REPS")
+            echo "钉位穷举：窗口 $PIN_WINDOW · 落位数 $PIN_POSITIONS（0=自动）· 每落位 $PIN_REPS 种子"
+          fi
+          mkdir -p artifacts/matrix
+          python3 scripts/matrix.py "${ARGS[@]}" > artifacts/matrix/run.log 2>&1
+          tail -80 artifacts/matrix/run.log
+
+      - name: 写 Job Summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("artifacts/matrix/summary.json")
+          if not p.exists():
+              print("### 矩阵未产出 summary.json（跑局或解析失败，见 artifact 原始日志）"); raise SystemExit
+          s = json.loads(p.read_text(encoding="utf8"))
+          print(f"### 骏大祭矩阵 · {s['seeds']} · {s['parsed']}/{s['count']} 局解析成功")
+          print(f"\n卡组 `{s['cards']}` · 育成马 `{s.get('uma', 'default')}`\n")
+          print(f"| 指标 | 值 |\n|---|---|")
+          print(f"| mean | **{s['mean']}** |")
+          print(f"| min / max | {s['min']} / {s['max']} |")
+          for k, label in (("speed","速"),("stamina","耐"),("power","力"),("guts","根"),("wisdom","智")):
+              print(f"| {label} 均 | {s.get('mean_'+k)} |")
+          print(f"| **五维合计均** | **{s.get('mean_five_sum')}** |")
+          print(f"| PT 均 | {s.get('mean_pt')} |")
+          print(f"| 档位分布 | {s.get('rank_prefix')} |")
+          print(f"\n#### 守门链命中（合计 {sum(s['gate_hits'].values())} 次）\n")
+          print("| 守门 | 次数 |\n|---|---|")
+          for k, v in s["gate_hits"].items(): print(f"| {k} | {v} |")
+          pin = s.get("pin")
+          if pin:
+              b = pin.get("best") or {}
+              print(f"\n#### 钉位穷举 · 窗口 {pin['window']} · {pin['distinct_positions']} 个互异落位 · 钉位生效 {pin['pin_ok']} 局\n")
+              print(f"最优落位 **d{b.get('pos')}** 均分 **{b.get('mean')}**（{b.get('games')} 局，{b.get('min')}–{b.get('max')}）\n")
+              print("| 落位 | 局数 | 均分 | min | max |\n|---|---|---|---|---|")
+              for e in sorted(pin["table"], key=lambda x: -x["mean"])[:24]:
+                  print(f"| d{e['pos']} | {e['games']} | {e['mean']} | {e['min']} | {e['max']} |")
+          print(f"\n#### buff 位置（教诲分配方案）Top · 每局均 {s.get('assign_windows')} 个窗口\n")
+          print("| 方案 | 命中次数 |\n|---|---|")
+          for name, n in s.get("assign_top", [])[:12]: print(f"| {name} | {n} |")
+          print(f"\n#### buff 替换（教诲融合）Top\n")
+          print("| 融合 | 出现局数 |\n|---|---|")
+          for name, n in s["fusion_top"][:12]: print(f"| {name} | {n} |")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: matrix-${{ github.event.inputs.start_seed || '61444' }}-x${{ github.event.inputs.count || '100' }}
+          path: artifacts/matrix/
+          retention-days: 30

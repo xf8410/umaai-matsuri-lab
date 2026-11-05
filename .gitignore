@@ -2,3 +2,8 @@
 logs/
 __pycache__/
 *.pyc
+
+# lab：矩阵产物与跑局覆盖层（仓根 ai_config.toml 是引擎覆盖层，非 data/ 默认层）
+/artifacts
+/ai_config.toml
+/matsuri_config.toml

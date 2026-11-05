@@ -27,14 +27,61 @@ const SHINING_BONUS: f64 = 15.0;
 const KENSAN_TRIGGER_BONUS: f64 = 200.0;
 /// 多亮起囤积的惩罚（亮起会锁人、降低其他位置期望人头）
 const LIT_HOARD_PENALTY: f64 = 60.0;
-/// 友人外出「尽早用完」策略的加分
-const FRIEND_OUTING_EARLY_BONUS: f64 = 120.0;
 /// 治病的保底价值（生病 / 不擅长时）
 const CLINIC_VALUE: f64 = 400.0;
 /// 非变胖病位的惩罚
 const OTHER_ILL_PENALTY: f64 = 40.0;
 /// 单次比赛的保底价值（强制比赛回合只有比赛一个候选）
 const FORCED_RACE_BASE: f64 = 500.0;
+/// 满体力闲逛惩罚（vital ≥ 70 时休息 / 普通出行扣分；GA 验证行为修正）
+const HIGH_VITAL_IDLE_PENALTY: f64 = 200.0;
+/// 满体力阈值
+const HIGH_VITAL_THRESHOLD: i32 = 70;
+/// 演目 Lv 上限（有 SSR 吾妻时可到 10）
+const ACT_LEVEL_CAP: i32 = 10;
+/// 根性训练位人头不足 `root_train_min_heads` 时的软惩罚（「能不点根就不点根」——
+/// 是偏好不是禁令：人头不够时根照样能和其他动作比分数，别的动作更烂时仍会选根；
+/// 第三年合宿结束后的稽古兑现窗口末回合（本番后空窗期结束、URA 前）
+const ENDGAME_LAST_TURN: i32 = 71;
+/// 人头 ≥ 门槛则完全不受影响。量级 ≈ 一次训练的典型收益，足以让位但不封死）
+const ROOT_TRAIN_PENALTY: f64 = 3000.0;
+
+/// 拉面式属性上限软约束函数（xulai1001/umaai-rs handwritten_evaluator.rs::status_soft_function
+/// 原样移植，见 lab/属性溢出软上限旋钮移植.md §3.1）。
+///
+/// `x` = 当前相对「有效上限」的超出量（x<0 表示仍有余量，x>=0 表示已到/超上限）；
+/// `reserve` = 软约束带宽（储备带）。返回软约束下的「有效位置」，两处取值之差 = 软折扣后的边际。
+fn status_soft_function(x: f64, reserve: f64) -> f64 {
+    if reserve <= 0.0 {
+        return x.min(0.0); // 储备带为 0 → 退化成硬上限（只认负余量）
+    }
+    let reserve_inv_x2 = 1.0 / (2.0 * reserve);
+    if x >= 0.0 {
+        0.0 // 已到/超上限 → 边际归零
+    } else if x > -reserve {
+        -x * x * reserve_inv_x2 * 0.5 // 储备带内 → 二次折扣 = -x²/(4·reserve)
+    } else {
+        x + 0.25 * reserve // 远离上限 → 线性（≈全额）
+    }
+}
+
+/// 离线搜索蒸馏出的教诲落位先验（`scripts/tabu_route.py` 轮次 7 的禁忌搜索路线）
+///
+/// 行 = 教诲窗口（`data.advice_windows`，turn 2/11/23/35/47/59），列 = 演目（速/耐/力/根/智），
+/// 值 = 该演目上更优的 **基础 buff id**（101 羁绊 / 201 得意率 / 301 提示 / 401 助力 / 501 体力减轻）。
+/// 用基础 id 而不是転成 id：転成 id 随 `[fusion]` 预设变，基础 id 是训练员真正在决策的东西。
+///
+/// 内化它的目的是摆脱外部钉位 `MATSURI_ASSIGN_PIN`：先验强度 `advice.route` 取足够大时
+/// 等价于硬钉位，取小值时只是打分表上的一项偏好（搜出的落位不在候选里也不会崩）。
+/// 实测出处：留出集 61900–61999 上，钉这条路线比 AI 自选 +4173.2（t=9.38，81/100）。
+pub(crate) const ROUTE_PRIOR: [[i32; 5]; 6] = [
+    [201, 101, 501, 301, 401], // T2  序盘：体力减轻挂主轴速、羁绊给耐
+    [501, 301, 101, 201, 401], // T11
+    [101, 501, 401, 301, 201], // T23
+    [101, 301, 501, 401, 201], // T35
+    [501, 101, 401, 301, 201], // T47 收尾：分身（801←501）交给担当最多的演目
+    [501, 401, 101, 301, 201], // T59
+];
 
 /// 估算上下文（构造时一次算定，避免每次动作重复遍历人头）
 struct Context {
@@ -56,6 +103,22 @@ struct Context {
     share: [f64; 5],
     /// 下一次発表会 / 本番
     checkpoint: Option<CheckpointCtx>,
+    /// 五维动态权重乘子（`status_catchup`；全 1 = 关闭）
+    dyn_status: [f64; 5],
+    /// 演目 Lv 动态权重乘子（`act_catchup`；全 1 = 关闭）
+    dyn_act: [f64; 5],
+    /// 体力影子价格乘子（`vital_decay`；1 = 关闭）
+    vital_scale: f64,
+    /// 稽古节奏乘子（`keiko_tempo`；1 = 关闭，>1 落后要加速，<1 领先可卡回合）
+    tempo_scale: f64,
+    /// 近顶轴标记（按**生效上限**判定；`overflow.margin`）
+    near_cap: [bool; 5],
+    /// 非近顶轴的溢出放大因子（全 1 = 关闭）
+    overflow_factor: [f64; 5],
+    /// 第三年合宿结束～T71 的普通回合窗口
+    endgame: bool,
+    /// 满槽数超过剩余普通回合的比例（0–1）
+    endgame_pressure: f64,
 }
 
 /// 下一次発表会 / 本番的达标压力
@@ -143,6 +206,114 @@ impl<'a> Model<'a> {
                 turns_left: f64::from((schedule.turn - turn).max(0)),
             });
 
+        // ---- 动态权重（全部默认 0 → 乘子恒为 1，逐位退化成静态打分）----
+        let dynamic = &cfg.dynamic;
+        let max_turn = f64::from(game.max_turn().max(1));
+        let phase = (f64::from(turn) / max_turn).clamp(0.0, 1.0);
+
+        // ① 五维追赶：剩余空间占比高于均值的轴加权（速先满 → 把回合让给根 / 智）
+        let dyn_status = if dynamic.status_catchup > 0.0 {
+            let uma = game.uma();
+            let head: [f64; 5] = std::array::from_fn(|axis| {
+                let limit = uma.five_status_limit[axis].max(1);
+                let value = uma.five_status[axis].clamp(0, limit);
+                f64::from(limit - value) / f64::from(limit)
+            });
+            let mean = head.iter().sum::<f64>() / 5.0;
+            std::array::from_fn(|axis| {
+                (1.0 + dynamic.status_catchup * 2.0 * (head[axis] - mean)).max(0.0)
+            })
+        } else {
+            [1.0; 5]
+        };
+
+        // ② 演目 Lv 追赶：落后于全队均值的演目升级更值钱（治 10/10/10/8/8 长尾）
+        let level = game.acts.level;
+        let dyn_act = if dynamic.act_catchup > 0.0 {
+            let mean = level.iter().map(|value| f64::from(*value)).sum::<f64>() / 5.0;
+            std::array::from_fn(|act| {
+                let gap = (mean - f64::from(level[act])).max(0.0);
+                (1.0 + dynamic.act_catchup * gap).clamp(0.0, 4.0)
+            })
+        } else {
+            [1.0; 5]
+        };
+
+        // ③ 体力影子价格随回合衰减：末期每点体力换不到几次训练，不值钱了
+        let vital_scale = 1.0 - dynamic.vital_decay * phase;
+
+        // ④ 稽古节奏：与「达标线」比短板 Lv。落后 → 加速升级；领先 → 压低升级价值，
+        //    让休息 / 出行有机会赢，即「卡回合」把回合留给更好的机会。
+        //    达标线口径：Lv1 起，Senior 合宿前推到 `act_level_target`，收尾推到 Lv 上限。
+        let tempo_scale = if dynamic.keiko_tempo > 0.0 {
+            let target = f64::from(cfg.act_level_target.clamp(1, ACT_LEVEL_CAP));
+            let cap = f64::from(ACT_LEVEL_CAP);
+            let camp_turn = f64::from(game.data.camp.windows.get(2).map_or(60, |w| w.start));
+            let now = f64::from(turn);
+            let line = if now <= camp_turn {
+                1.0 + (target - 1.0) * (now / camp_turn.max(1.0))
+            } else {
+                let end = target.max(cap);
+                target + (end - target) * (now - camp_turn) / (max_turn - camp_turn).max(1.0)
+            };
+            let lead = f64::from(level.iter().min().copied().unwrap_or(1)) - line;
+            (1.0 - dynamic.keiko_tempo * lead / 3.0).clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+
+        // ⑤ 溢出：按**生效上限**标记近顶轴，只放大非近顶轴；主属性近顶时另外保留
+        //    副属性 / PT 的价值（见 `train_value` 的 `keep`）。
+        let overflow = &cfg.overflow;
+        let mut near_cap = [false; 5];
+        let mut near_count = 0usize;
+        if overflow.margin > 0.0 || overflow.tilt > 0.0 || overflow.keep > 0.0 {
+            for (axis, near) in near_cap.iter_mut().enumerate() {
+                let limit = game.uma().five_status_limit[axis].max(1);
+                let value = game.uma().five_status[axis].clamp(0, limit);
+                let ratio = f64::from(limit - value) / f64::from(limit);
+                *near = ratio <= overflow.margin;
+                if *near {
+                    near_count += 1;
+                }
+            }
+        }
+        let overflow_factor: [f64; 5] = std::array::from_fn(|axis| {
+            if near_count > 0 && !near_cap[axis] {
+                1.0 + overflow.tilt * near_count as f64 / 5.0
+            } else {
+                1.0
+            }
+        });
+
+        // ⑥ 第三年合宿结束～T71：只在普通回合统计「满槽数 vs 剩余普通回合」。
+        //    URA（72–77）全稽古、每回合都能选一个，不进入本窗口。
+        let camp_end = game
+            .data
+            .camp
+            .windows
+            .get(2)
+            .map_or(63, |window| window.end);
+        let endgame = turn > camp_end
+            && turn <= ENDGAME_LAST_TURN
+            && !game.plan.camp_zone
+            && !game.plan.ura_period
+            && !game.plan.race
+            && !game.forced_rest;
+        let endgame_pressure = if endgame {
+            let pending = game.lit_acts().iter().filter(|lit| **lit).count();
+            let normal_turns = (turn..=ENDGAME_LAST_TURN)
+                .filter(|t| !game.uma().is_race_turn(*t))
+                .count();
+            if pending > normal_turns {
+                (pending - normal_turns) as f64 / pending as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         Ok(Self {
             game,
             consts,
@@ -161,6 +332,14 @@ impl<'a> Model<'a> {
                 avg_friend,
                 share,
                 checkpoint,
+                dyn_status,
+                dyn_act,
+                vital_scale,
+                tempo_scale,
+                near_cap,
+                overflow_factor,
+                endgame,
+                endgame_pressure,
             },
         })
     }
@@ -217,6 +396,10 @@ impl<'a> Model<'a> {
 
     /// 教诲分配方案估值（与 `apply_assignment` 的 801 硬约束同口径）
     pub(crate) fn assignment_value(&self, assign: &AdviceAssignment) -> f64 {
+        // 越界槽位直接否掉：搜索会枚举候选，panic 比给 −∞ 贵得多
+        if assign.0.iter().any(|slot| *slot >= 5) {
+            return f64::NEG_INFINITY;
+        }
         let effective = self.effective_assignment(assign);
         let mut total = 0.0;
         for (act, source) in effective.iter().enumerate() {
@@ -225,7 +408,36 @@ impl<'a> Model<'a> {
             let effect = self.game.advice_effect_of(source, level);
             total += self.slot_value(&effect, act);
         }
+        total += self.route_prior_value(&effective);
         total
+    }
+
+    /// 落位先验加分：与离线搜出的 [`ROUTE_PRIOR`] 逐位比对，命中一位加 `advice.route`
+    ///
+    /// 比的是**基础 buff id**（`advice.slots[source]`），転成后的 id 不参与——
+    /// 転成 id 由 `[fusion]` 预设决定，不是训练员在这一决策点上能选的东西。
+    fn route_prior_value(&self, effective: &[u8; 5]) -> f64 {
+        if self.advice.route <= 0.0 {
+            return 0.0;
+        }
+        let Some(window) = self.game.plan.advice_window else {
+            return 0.0;
+        };
+        let Some(prior) = ROUTE_PRIOR.get(window) else {
+            return 0.0;
+        };
+        let hits = effective
+            .iter()
+            .enumerate()
+            .filter(|&(act, &source)| {
+                self.game
+                    .advice
+                    .slots
+                    .get(usize::from(source))
+                    .is_some_and(|slot| *slot == prior[act])
+            })
+            .count();
+        hits as f64 * self.advice.route
     }
 
     // ------------------------------------------------------------------
@@ -234,20 +446,97 @@ impl<'a> Model<'a> {
 
     /// 训练 / 演目稽古估值（成功收益 × (1-p) + 失败惩罚 × p）
     fn train_value(&self, train: usize, keiko: bool, action: &Action) -> f64 {
-        let Ok(preview) = self.game.preview_training(train, keiko) else {
+        // 预览同时返回参与教诲与闪彩人数，供门槛判定与羁绊估值复用（同一候选不重算）
+        let Ok((preview, advice, shining)) = self.game.preview_training_full(train, keiko) else {
             return f64::NEG_INFINITY;
         };
+        // 根训练人头门槛：「能不点根就不点根，除非 5 人头」（0 = 关闭）。
+        // 只管**普通训练**；稽古不受门槛限制——根演目升级只能靠稽古填槽，
+        // 卡稽古等于把根 Lv 永久锁死（用户口径：Lv5 是达标线，不是一直不给升）。
+        // 软惩罚非禁令：别的动作都更烂时根训练照样能被选上。
+        if self.cfg.root_train_min_heads > 0 && train == 3 && !keiko {
+            let heads = advice.participant_count;
+            if heads < self.cfg.root_train_min_heads as i32 {
+                return -ROOT_TRAIN_PENALTY;
+            }
+        }
         let fail_prob = (f64::from(preview.failure_rate) / 100.0).clamp(0.0, 1.0);
-        let success = self.value_of(&preview.value)
+        let mut success = self.value_of_with(&preview.value, true)
             + self.resource_value(action)
-            + self.training_friendship(train)
+            + self.training_friendship(train, &advice, shining)
             + self.kensan_bonus(action);
+        // 主属性近顶时，副属性 / PT 仍是速训练的价值来源：给一个小幅保留加分，
+        // 避免溢出层把「速训练 → 力量 / PT」完全倾斜掉。
+        if let Some(main) = self.train_axis(action)
+            && self.ctx.near_cap[main]
+            && self.cfg.overflow.keep > 0.0
+        {
+            let gains: [i32; 5] = std::array::from_fn(|axis| {
+                if axis == main {
+                    0
+                } else {
+                    preview.value.status_pt[axis]
+                }
+            });
+            success += self.cfg.overflow.keep
+                * (self.status_gain(&gains) + self.pt_gain(preview.value.status_pt[5]));
+        }
+        if keiko {
+            success += self.endgame_keiko_bonus(action);
+        }
         let fail = if keiko {
             -FAIL_PENALTY_KEIKO
         } else {
             -FAIL_PENALTY_TRAIN
         };
-        success * (1.0 - fail_prob) + fail * fail_prob
+        let mut expected = success * (1.0 - fail_prob) + fail * fail_prob;
+        // 末段普通回合：满槽 > 可兑现回合时，普通训练让位（只扣 Train，不扣休息 / 治病）。
+        if !keiko
+            && self.ctx.endgame
+            && self.ctx.endgame_pressure > 0.0
+            && matches!(action, Action::Train(_))
+        {
+            expected -= self.cfg.endgame.normal_penalty * self.ctx.endgame_pressure;
+        }
+        expected
+    }
+
+    /// 训练动作对应的主属性轴（ActionResult 的下标）
+    fn train_axis(&self, action: &Action) -> Option<usize> {
+        match action {
+            Action::Train(train) => Some(usize::from(*train)),
+            Action::ActTrain(act) => self
+                .game
+                .data
+                .acts
+                .get(usize::from(*act))
+                .map(|row| row.train),
+            _ => None,
+        }
+    }
+
+    /// 第三年合宿结束～T71 的满槽稽古加分（URA 不进入 `ctx.endgame`）
+    fn endgame_keiko_bonus(&self, action: &Action) -> f64 {
+        if !self.ctx.endgame || self.ctx.endgame_pressure <= 0.0 {
+            return 0.0;
+        }
+        let Action::ActTrain(act) = action else {
+            return 0.0;
+        };
+        let act = usize::from(*act);
+        let Some(gauge) = self.game.acts.gauge.get(act) else {
+            return 0.0;
+        };
+        let mut bonus = 0.0;
+        if *gauge >= self.game.act_gauge_max() {
+            bonus += self.cfg.endgame.keiko
+                * (1.0 + self.cfg.endgame.scarcity * self.ctx.endgame_pressure);
+        }
+        let level = self.game.acts.level[act];
+        if level < ACT_LEVEL_CAP {
+            bonus += self.cfg.endgame.level * f64::from((ACT_LEVEL_CAP - level).min(2));
+        }
+        bonus
     }
 
     /// 休息估值（普通 / 合宿版；含演目槽 +1）
@@ -278,32 +567,44 @@ impl<'a> Model<'a> {
         if vital < rest_vital {
             value += f64::from(rest_vital - vital) * self.weights.vital * 0.5;
         }
+        // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时休息是浪费）
+        value -= self.idle_penalty(vital);
         value
     }
 
     /// 普通出行估值（出行事件期望 + 演目槽 +1）
     fn normal_outing_value(&self) -> f64 {
-        let data = Data::get().ok();
-        let events: Vec<&umaai_core::gamedata::EventData> = data
-            .iter()
-            .flat_map(|data| data.events.system_events.iter())
-            .filter(|(key, _)| key.starts_with("normal_outing"))
-            .map(|(_, event)| event)
-            .collect();
-        let expected = if events.is_empty() {
-            60.0
-        } else {
-            events
-                .iter()
-                .filter_map(|event| event.choices.first())
-                .map(|group| self.event_choice_value(0, 0, group))
-                .sum::<f64>()
-                / events.len() as f64
-        };
-        expected + self.resource_value(&Action::NormalOuting)
+        // 单遍累加：原实现先把 22 条系统事件过滤进临时 Vec，再取长度与求和
+        // （上游 7252b84；候选每次估值都白分配一条 Vec）
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        if let Ok(data) = Data::get() {
+            for (key, event) in &data.events.system_events {
+                if !key.starts_with("normal_outing") {
+                    continue;
+                }
+                count += 1;
+                if let Some(group) = event.choices.first() {
+                    sum += self.event_choice_value(0, 0, group);
+                }
+            }
+        }
+        let expected = if count == 0 { 60.0 } else { sum / count as f64 };
+        let mut value = expected + self.resource_value(&Action::NormalOuting);
+        // 满体力闲逛惩罚（GA 验证：vital ≥ 70 时普通出行是浪费）
+        value -= self.idle_penalty(self.game.uma().vital);
+        value
     }
 
-    /// 友人出行估值（段事件期望 + 最低演目 Lv+1 + 槽 +1；攻略「尽早用完」加分）
+    /// 友人出行估值（段事件期望 + 最低演目 Lv+1 + 槽 +1 + 尽早用完权重 + 截止急迫 + 逐回合推敲）
+    ///
+    /// 「尽早用完」不再是一个写死的常量加分，而是三块可调的打分：
+    /// ① `weights.friend_outing`：每段基础策略分（替代 `FRIEND_OUTING_EARLY_BONUS`）；
+    /// ② 截止急迫：`friend_outing_deadline`（默认 Senior 合宿起点 ≈ 第三年 10 月上）前
+    ///    必须用完 5 段，剩余段越多 / 越接近截止，急迫分越高；
+    /// ③ 逐回合推敲：体力平滑带（训练贵但能练 → 外出回体力 + 演目 Lv 平滑过渡）与
+    ///    满体力（休息 / 普通出行吃闲置惩罚 → 外出是更优的花回合方式）。
+    /// 粉丝达标不建模（本项目不处理粉丝机制），故不参与此处打分。
     fn friend_outing_value(&self) -> f64 {
         if self.game.friend_outing_add_level().is_none() {
             return f64::NEG_INFINITY;
@@ -316,9 +617,17 @@ impl<'a> Model<'a> {
             .position(|used| !*used)
             .map(|index| index + 1)
             .unwrap_or(1);
+        let remaining_uses = (self.game.friend.out_used.len() - step + 1).max(1);
+        // 段键是固定 1–5 的字面量：直接借用查表，避免 `step.to_string()` 与整条事件深拷贝
+        // （上游 7252b84）
+        const STEP_KEYS: [&str; 5] = ["1", "2", "3", "4", "5"];
         let expected = Data::get()
             .ok()
-            .and_then(|data| data.events.friend_events.get(&step.to_string()).cloned())
+            .and_then(|data| {
+                STEP_KEYS
+                    .get(step.saturating_sub(1))
+                    .and_then(|key| data.events.friend_events.get(*key))
+            })
             .map(|event| {
                 event
                     .choices
@@ -328,15 +637,62 @@ impl<'a> Model<'a> {
             .unwrap_or(50.0);
         let mut value = expected + self.resource_value(&Action::FriendOuting);
         if self.cfg.friend_outing_early {
-            value += FRIEND_OUTING_EARLY_BONUS;
+            value += self.weights.friend_outing;
         }
+        value += self.friend_outing_urgency_value(remaining_uses);
+        value += self.friend_outing_deliberation_value();
         value
+    }
+
+    /// 友人外出截止回合：配置显式值优先，否则取 Senior 合宿窗口（index 2）起点
+    /// （骏大祭 Senior 合宿 ≈ 第三年 10 月，即「10 月上之前必须用完」的截止点）。
+    fn friend_outing_deadline_turn(&self) -> i32 {
+        if self.cfg.friend_outing_deadline > 0 {
+            return self.cfg.friend_outing_deadline;
+        }
+        self.game.data.camp.windows.get(2).map_or(60, |window| window.start)
+    }
+
+    /// 截止急迫分：剩余段数相对剩余回合越「拥挤」、越接近截止，分越高。
+    /// `friend_outing_urgency = 0` 时关闭（退化为只按段事件 + 演目收益打分）。
+    fn friend_outing_urgency_value(&self, remaining_uses: usize) -> f64 {
+        if self.cfg.friend_outing_urgency <= 0.0 || remaining_uses == 0 {
+            return 0.0;
+        }
+        let turns_left = f64::from((self.friend_outing_deadline_turn() - self.game.turn()).max(0));
+        // 拥挤度：剩余段 / 剩余回合（>1 = 按当前节奏用不完，必须提速）
+        let crowding = remaining_uses as f64 / turns_left.max(1.0);
+        // 接近截止的线性抬升（截止前 20 回合内 0 → 1）
+        let proximity = ((20.0 - turns_left) / 20.0).clamp(0.0, 1.0);
+        self.cfg.friend_outing_urgency * (crowding + proximity)
+    }
+
+    /// 逐回合推敲的体力带调制（在段事件 / 演目收益之外的边际偏好）：
+    /// ① 平滑带（`rest_vital`..70）：训练能练但每次掉体力，外出既回体力又升演目，平滑过渡；
+    /// ② 满体力（≥70）：休息 / 普通出行吃 `idle_penalty`，外出是更优的「花掉这回合」。
+    /// 体力过低（<`rest_vital`）时休息更直接回体力，此处不加偏好，交给打分表对比。
+    fn friend_outing_deliberation_value(&self) -> f64 {
+        let vital = self.game.uma().vital;
+        if vital >= HIGH_VITAL_THRESHOLD {
+            self.weights.friend_outing * 0.5
+        } else if vital >= self.cfg.rest_vital {
+            self.weights.friend_outing * 0.3
+        } else {
+            0.0
+        }
     }
 
     /// 比赛估值（强制比赛回合给保底；自选比赛受 `self_race` 开关控制）
     fn race_value(&self) -> f64 {
         let forced = self.game.plan.race;
         if !forced && !self.cfg.self_race {
+            return f64::NEG_INFINITY;
+        }
+        // 自选赛回合门槛：「第三年天秋后要是训练烂可以跑 g1」（0 = 关闭）
+        if !forced
+            && self.cfg.self_race_from_turn > 0
+            && self.game.turn() < self.cfg.self_race_from_turn
+        {
             return f64::NEG_INFINITY;
         }
         let mut value = self.estimated_race_reward() + self.resource_value(&Action::Race);
@@ -377,22 +733,29 @@ impl<'a> Model<'a> {
                 _ => "race_g4",
             }
         };
-        let Some(event) = Data::get()
+        let Some(mut event) = Data::get()
             .ok()
             .and_then(|data| data.events.system_events.get(key).cloned())
         else {
             return 80.0;
         };
-        let base = event
+        // 与结算同口径：先按 `race_scale` 缩放面板（逐轴 floor），再估值。
+        // 旧写法是「估完再乘一个加算 scale」，既用错了乘算口径，也把体力项一起乘了。
+        let scale = self.game.race_scale();
+        for group in &mut event.choices {
+            for row in group {
+                for axis in 0..5 {
+                    row.value.status_pt[axis] =
+                        (f64::from(row.value.status_pt[axis]) * scale).floor() as i32;
+                }
+                row.value.status_pt[5] =
+                    (f64::from(row.value.status_pt[5]) * scale).floor() as i32;
+            }
+        }
+        event
             .choices
             .first()
-            .map_or(0.0, |group| self.event_choice_value(event.id, 0, group));
-        let scale = (100.0
-            + f64::from(self.game.uma().race_bonus)
-            + f64::from(self.game.scenario_race_bonus()))
-            / 100.0;
-        // 属性 / PT 吃 scale，体力不吃；体力项占比小，统一乘只影响排序而不改变量纲
-        base * scale
+            .map_or(0.0, |group| self.event_choice_value(event.id, 0, group))
     }
 
     // ------------------------------------------------------------------
@@ -416,7 +779,20 @@ impl<'a> Model<'a> {
     }
 
     /// 五维增量评分（含策略权重 `status_weights`）
+    ///
+    /// 实机口径修正：预览收益先按「上限截断 + 超 `status_halve_threshold` 减半」折算成
+    /// **有效入账**，再走非减半的 `five_status_final_score` 凸表换算回评分点。
+    /// 这样「已贴上限的维」边际趋零，决策不会再把回合浪费在吃不满的维上（复盘 T76）。
+    /// `status_halve_threshold = 0` 时退化为原行为（直接按非减半表打满）。
     fn status_gain(&self, gains: &[i32; 5]) -> f64 {
+        self.status_gain_with(gains, false)
+    }
+
+    /// 五维增量评分；`training` = 是否套用溢出层的非近顶轴放大
+    ///
+    /// 事件 / 比赛 / 教诲分配走 `status_gain`（不放大），只有训练估值走 `training=true`，
+    /// 避免溢出层污染事件与比赛口径。
+    fn status_gain_with(&self, gains: &[i32; 5], training: bool) -> f64 {
         let uma = self.game.uma();
         let mut total = 0.0;
         for (axis, gain) in gains.iter().enumerate() {
@@ -424,11 +800,64 @@ impl<'a> Model<'a> {
                 continue;
             }
             let current = uma.five_status[axis];
-            let after = (current + *gain).min(uma.five_status_limit[axis]);
+            let effective = self.effective_status_gain(axis, current, *gain);
+            if effective == 0 {
+                continue;
+            }
+            let after = (current + effective).min(uma.five_status_limit[axis]);
+            let overflow = if training {
+                self.ctx.overflow_factor[axis]
+            } else {
+                1.0
+            };
             total += (self.status_score(axis, after) - self.status_score(axis, current))
-                * self.status_weights[axis];
+                * self.status_weights[axis]
+                * self.ctx.dyn_status[axis]
+                * overflow;
         }
         total
+    }
+
+    /// 单维「有效入账」：上限截断 + 超阈值部分按 `status_halve_factor` 保留。
+    ///
+    /// 阈值与上限都用模拟器的原始（非减半）坐标——实机减半的是**入账**不是面板数值，
+    /// 所以无需对阈值做面板换算（`status_halve_threshold = 0` = 关闭，返回截断后的原值）。
+    ///
+    /// `status_soft_reserve = true` 时改走拉面式「时间感知软上限储备」分支
+    /// （移植自 xulai1001/umaai-rs handwritten_evaluator.rs，见 lab/属性溢出软上限旋钮移植.md）。
+    fn effective_status_gain(&self, axis: usize, current: i32, gain: i32) -> i32 {
+        let limit = self.game.uma().five_status_limit[axis];
+
+        // —— 分支 A：拉面式时间感知软上限储备 ——
+        if self.cfg.status_soft_reserve {
+            let remain_turn = f64::from((self.game.max_turn() - self.game.turn() - 1).max(0));
+            let total_turn = f64::from(self.game.max_turn().max(1));
+            let reserve = self.cfg.reserve_status_factor
+                * remain_turn
+                * (1.0 - remain_turn / (total_turn * 2.0));
+            let remain = limit - current - self.cfg.final_bonus;
+            let s0 = status_soft_function(-f64::from(remain), reserve);
+            let s1 = status_soft_function(f64::from(gain - remain), reserve);
+            // s1−s0 = 软折扣后的「有效入账属性点」：远离上限≈gain，储备带内折扣，越上限=0
+            return ((s1 - s0).round() as i32).clamp(0, gain.max(0));
+        }
+
+        // —— 分支 B：现行「上限截断 + 超阈值减半」——
+        let capped = ((current + gain).min(limit) - current).max(0);
+        if capped == 0 || self.cfg.status_halve_threshold <= 0 {
+            return capped;
+        }
+        let threshold = self.cfg.status_halve_threshold;
+        let factor = self.cfg.status_halve_factor.clamp(0.0, 1.0);
+        if current >= threshold {
+            // 整段入账都在阈值之上 → 全部按比例保留
+            (f64::from(capped) * factor).round() as i32
+        } else {
+            // 跨阈值：阈值以下全额、以上按比例
+            let full = (threshold - current).min(capped);
+            let over = capped - full;
+            full + (f64::from(over) * factor).round() as i32
+        }
     }
 
     /// 单轴增量评分（含策略权重）
@@ -453,7 +882,16 @@ impl<'a> Model<'a> {
         } else {
             155.0 + (value - 70.0)
         };
-        raw * self.weights.vital
+        raw * self.weights.vital * self.ctx.vital_scale
+    }
+
+    /// 满体力闲置惩罚（休息 / 普通出行；`vital_idle` 让它随超出量线性放大）
+    fn idle_penalty(&self, vital: i32) -> f64 {
+        if vital < HIGH_VITAL_THRESHOLD {
+            return 0.0;
+        }
+        let over = f64::from(vital - HIGH_VITAL_THRESHOLD);
+        HIGH_VITAL_IDLE_PENALTY * (1.0 + self.cfg.dynamic.vital_idle * over / 30.0)
     }
 
     /// 体力增量价值（按上限夹取）
@@ -469,8 +907,13 @@ impl<'a> Model<'a> {
 
     /// 一次 `ActionValue` 的评分折算（属性 + PT + 体力 + 干劲 + 羁绊 + 灵感）
     fn value_of(&self, value: &ActionValue) -> f64 {
+        self.value_of_with(value, false)
+    }
+
+    /// `ActionValue` 折算；`training` = 是否套用溢出层的非近顶轴放大
+    fn value_of_with(&self, value: &ActionValue, training: bool) -> f64 {
         let gains: [i32; 5] = std::array::from_fn(|axis| value.status_pt[axis]);
-        self.status_gain(&gains)
+        self.status_gain_with(&gains, training)
             + self.pt_gain(value.status_pt[5])
             + self.vital_gain(self.game.uma().vital, value.vital)
             + f64::from(value.motivation) * self.weights.motivation
@@ -479,9 +922,17 @@ impl<'a> Model<'a> {
     }
 
     /// 一次训练的羁绊 / 灵感 / 闪彩估值（引擎训练值不含这些，训练员侧补）
-    fn training_friendship(&self, train: usize) -> f64 {
+    ///
+    /// 参与教诲与闪彩人数由 [`preview_training_full`](MatsuriGame::preview_training_full)
+    /// 一次算好后传入（上游 7252b84：同一候选不重算）。
+    fn training_friendship(
+        &self,
+        train: usize,
+        advice: &crate::game::advice::ParticipantAdvice,
+        shining: usize,
+    ) -> f64 {
         let rules = &self.game.data.rules.friendship_gain;
-        let lesson = self.game.participant_advice(train).relationship_gain;
+        let lesson = advice.relationship_gain;
         let mut total = 0.0;
         if let Some(slot) = self.game.base.distribution.get(train) {
             for &index in slot {
@@ -513,7 +964,7 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        total += self.game.shining_count(train) as f64 * SHINING_BONUS;
+        total += shining as f64 * SHINING_BONUS;
         total
     }
 
@@ -543,6 +994,22 @@ impl<'a> Model<'a> {
 
     /// 演目 +1 Lv 的估值（普通价值 + 発表会急迫 + Senior 合宿前目标）
     fn level_value(&self, act: usize) -> f64 {
+        // 根性演目 Lv 封顶：「第二年末根强化到 5 就可以不用管了」。
+        // 只是**达标线不是禁令**：`root_level_cap_until`（>0）之后封顶解除，根恢复正常
+        // 升级打分；封顶期内达标后推 Lv 的打分归零（发表会达标压力除外）；演目槽价值不受影响。
+        if act == 3
+            && self.cfg.root_level_cap > 0
+            && (self.cfg.root_level_cap_until == 0
+                || self.game.turn() < self.cfg.root_level_cap_until)
+            && self.game.acts.level[act] >= self.cfg.root_level_cap
+            && self
+                .ctx
+                .checkpoint
+                .as_ref()
+                .is_none_or(|checkpoint| self.game.acts.level[act] >= checkpoint.required)
+        {
+            return 0.0;
+        }
         let mut value = self.weights.act_level;
         if let Some(checkpoint) = &self.ctx.checkpoint
             && self.game.acts.level[act] < checkpoint.required
@@ -560,7 +1027,18 @@ impl<'a> Model<'a> {
             let urgency = ((30.0 - self.ctx.senior_camp_left).max(0.0) / 30.0).min(1.0);
             value += self.weights.act_level * (0.5 + urgency);
         }
-        value
+        // 质变卡阶（攻略优化点 4）：Lv7→8 / Lv8→9 是技能pt 乘区的巨大跳变
+        // （+80%→+100%→+135%），跨这两级的 +1 Lv 远贵于普通级。只对编成済み演目（有卡）计，
+        // 根性无卡自动排除。吾妻外出抬最低演目 Lv 也走这里 → 自动把外出引导到质变点。
+        if self.cfg.level_step_bonus > 0.0 && self.ctx.cards[act] > 0.0 {
+            match self.game.acts.level[act] {
+                7 => value += self.cfg.level_step_bonus * 0.6, // → Lv8
+                8 => value += self.cfg.level_step_bonus,       // → Lv9（跳变更大）
+                _ => {}
+            }
+        }
+        // 动态调制：演目 Lv 追赶 × 稽古节奏（落后加速 / 领先卡回合）
+        value * self.ctx.dyn_act.get(act).copied().unwrap_or(1.0) * self.ctx.tempo_scale
     }
 
     /// 兑现「追加稽古」掷中的额外价值（该训练位参与者含研鑽绑定演目担当）
@@ -620,8 +1098,8 @@ impl<'a> Model<'a> {
         }
         self.value_of(&value)
             + self.extra_status_value(row.extra_status.as_ref())
-            + self.flags_value(row.add_flags.as_ref(), -1.0)
-            + self.flags_value(row.remove_flags.as_ref(), 1.0)
+            + self.flags_value(row.add_flags.as_ref(), 1.0)
+            + self.flags_value(row.remove_flags.as_ref(), -1.0)
     }
 
     /// `ExtraStatus` 的期望价值（随机项按当前五维平均边际；上次训练项取 `last_train` 轴）
@@ -644,36 +1122,36 @@ impl<'a> Model<'a> {
         }
     }
 
-    /// 状态增删的估值（`sign`：+1 = 移除（收益），-1 = 添加（惩罚））
+    /// 状态增删的估值（`sign`：+1 = 添加，-1 = 移除；净值 = 增益 − 惩罚）
+    ///
+    /// 增益项（傲娇 / 良训练员 / 精神清爽 / 幸运）与惩罚项（变胖 / 各类 ill）必须分开
+    /// 累加再相减：混成一个 `magnitude` 再乘符号，会把「加上一个增益 flag」算成扣分、
+    /// 「移除一个增益 flag」算成加分，事件选项排序整体反向。
     fn flags_value(&self, flags: Option<&UmaFlags>, sign: f64) -> f64 {
         let Some(flags) = flags else {
             return 0.0;
         };
-        let mut magnitude = 0.0;
+        let mut harm = 0.0;
+        let mut benefit = 0.0;
         if flags.ill.contains(Ill::FAT) {
-            magnitude += self.weights.fat;
+            harm += self.weights.fat;
         }
-        for kind in [
-            Ill::SKIN,
-            Ill::HEADACHE,
-            Ill::LAZY,
-            Ill::NIGHT,
-            Ill::BAD_TRAINER,
-        ] {
+        for kind in [Ill::SKIN, Ill::HEADACHE, Ill::LAZY, Ill::NIGHT] {
             if flags.ill.contains(kind) {
-                magnitude += OTHER_ILL_PENALTY;
+                harm += OTHER_ILL_PENALTY;
             }
         }
-        if flags.bad_trainer {
-            magnitude += OTHER_ILL_PENALTY;
+        // `bad_trainer` 与 `Ill::BAD_TRAINER` 同置同清，只计一次
+        if flags.bad_trainer || flags.ill.contains(Ill::BAD_TRAINER) {
+            harm += OTHER_ILL_PENALTY;
         }
         if flags.aijiao || flags.good_trainer {
-            magnitude += 30.0;
+            benefit += 30.0;
         }
         if flags.refresh_mind > 0 || flags.lucky_count > 0 {
-            magnitude += 20.0;
+            benefit += 20.0;
         }
-        magnitude * sign
+        (benefit - harm) * sign
     }
 
     /// 追加稽古上档「解一个 debuff」的估值
@@ -756,6 +1234,14 @@ impl<'a> Model<'a> {
         // 研钻（追加稽古；吃演目 Lv 权重）
         value +=
             f64::from(effect.kensan_rate) / 100.0 * (train + keiko) * 150.0 * self.advice.level;
+        // 特化上限（601 特別稽古）：把该演目的训练基础上限抬高 `status_limit` 点。
+        // 既有打分表**完全没算这一项**，而 601 恰是离线搜出路线里出现最多的転成 buff
+        // （满级 +25，基础上限 2200 到硬顶 2500 只有 300 余量 → 抬上限是末期稀缺资源）
+        value += f64::from(effect.status_limit) * (train + keiko) * self.advice.status_limit;
+        // 助力の支え（401）：非友情训练的保底收益，是个开关量，不按数值放大
+        if effect.support_assist {
+            value += (train + keiko) * non_friend * self.advice.assist;
+        }
         // 不屈（吃达标 / 风险权重）
         if let Some(threshold) = effect.fail_vital_threshold {
             let vital = self.game.uma().vital;
@@ -924,5 +1410,208 @@ mod tests {
             0.0,
             "到上限后边际为 0"
         );
+    }
+
+    /// 属性减半：超阈值入账按比例保留，已贴上限的维边际趋零（复盘 T76 的修正）
+    #[test]
+    fn status_halving_dampens_high_axis_gain() {
+        let mut game = sample_game();
+        let limit = game.uma().five_status_limit[0];
+        game.uma_mut().five_status[0] = limit - 20;
+
+        // 打开减半：阈值 1200、保留 0.5 → 预览 +200 只剩 20 余量且全在阈值上 → 有效入账 10
+        game.config.trainer.status_halve_threshold = 1200;
+        game.config.trainer.status_halve_factor = 0.5;
+        let (halved_eff, halved_score) = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            (
+                model.effective_status_gain(0, limit - 20, 200),
+                model.status_gain(&[200, 0, 0, 0, 0]),
+            )
+        };
+        assert_eq!(halved_eff, 10);
+
+        // 关闭减半（阈值 0）→ 有效入账 = 余量 20，评分应更高
+        game.config.trainer.status_halve_threshold = 0;
+        let (full_eff, full_score) = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            (
+                model.effective_status_gain(0, limit - 20, 200),
+                model.status_gain(&[200, 0, 0, 0, 0]),
+            )
+        };
+        assert_eq!(full_eff, 20);
+        assert!(
+            halved_score < full_score,
+            "减半后贴上限维的边际评分应低于非减半（{halved_score} < {full_score}）"
+        );
+
+        // 跨阈值：阈值下全额、以上减半（+300 → 1100..1200 全额 100，1200..1400 减半 100 → 200）
+        game.config.trainer.status_halve_threshold = 1200;
+        game.uma_mut().five_status[0] = 1100;
+        let cross_eff = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.effective_status_gain(0, 1100, 300)
+        };
+        assert_eq!(cross_eff, 200);
+    }
+
+    /// 友人外出：截止急迫随「剩余段 / 剩余回合」拥挤度与接近截止而抬升
+    #[test]
+    fn friend_outing_urgency_ramps_near_deadline() {
+        let mut game = sample_game();
+        game.config.trainer.friend_outing_urgency = 100.0;
+        game.config.trainer.friend_outing_deadline = 60;
+        // 解锁友人、5 段全未用
+        game.base.friend.card_id = Some(303999);
+        game.base.friend.out_used = vec![false; 5];
+        // 远未截止（T10）：急迫低
+        game.turn = 10;
+        let early_urgency = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.friend_outing_urgency_value(5)
+        };
+        // 接近截止（T58，剩 2 回合、5 段未用 → 拥挤度 2.5）：急迫高
+        game.turn = 58;
+        let late_urgency = {
+            let model = Model::new(&game, &game.config.trainer).expect("模型");
+            model.friend_outing_urgency_value(5)
+        };
+        assert!(
+            late_urgency > early_urgency,
+            "越接近截止、剩余段越多，急迫分越高（{late_urgency} > {early_urgency}）"
+        );
+        assert!(late_urgency > 0.0);
+    }
+
+    /// 溢出层：按生效上限标记近顶轴，只放大非近顶轴；全 0 时因子恒 1
+    #[test]
+    fn overflow_tilts_away_from_capped_axis() {
+        let mut game = sample_game();
+        let limit = game.uma().five_status_limit[0];
+        game.uma_mut().five_status[0] = limit;
+        let mut cfg = game.config.trainer.clone();
+        cfg.overflow = crate::config::OverflowConfig {
+            margin: 0.01,
+            tilt: 0.5,
+            keep: 0.0,
+        };
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert!(model.ctx.near_cap[0], "速顶满应标记近顶");
+        assert_eq!(model.ctx.overflow_factor[0], 1.0, "近顶轴不再额外压低");
+        assert!(
+            model.ctx.overflow_factor[3] > 1.0,
+            "非近顶轴应被放大: {:?}",
+            model.ctx.overflow_factor
+        );
+
+        cfg.overflow = crate::config::OverflowConfig::default();
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert_eq!(model.ctx.overflow_factor, [1.0; 5], "全 0 = 关闭");
+    }
+
+    /// 溢出保留：主属性顶满时，速训练的副属性 / PT 仍给 `keep` 加分
+    #[test]
+    fn overflow_keep_preserves_secondary_value_when_main_capped() {
+        let mut game = sample_game();
+        game.uma_mut().five_status[0] = game.uma().five_status_limit[0];
+        let mut cfg = game.config.trainer.clone();
+        cfg.overflow = crate::config::OverflowConfig {
+            margin: 0.0,
+            tilt: 0.0,
+            keep: 0.0,
+        };
+        let without = Model::new(&game, &cfg)
+            .expect("模型")
+            .action_value(&Action::Train(0));
+        cfg.overflow.keep = 0.2;
+        let with = Model::new(&game, &cfg)
+            .expect("模型")
+            .action_value(&Action::Train(0));
+        assert!(
+            with > without,
+            "keep 应保留速训练的副属性 / PT 价值: {without} -> {with}"
+        );
+    }
+
+    /// 末段稽古：第三年合宿后～T71 的普通回合，满槽数超过剩余普通回合时给满槽加分
+    #[test]
+    fn endgame_keiko_pressure_boosts_full_gauges() {
+        let mut game = crate::testing::sample_game_with_uma(106301);
+        game.turn = 70;
+        game.plan = game.derive_plan();
+        game.acts.gauge = [5; 5];
+        game.acts.level = [9; 5];
+        let mut cfg = game.config.trainer.clone();
+        cfg.endgame = crate::config::EndgameConfig {
+            keiko: 250.0,
+            scarcity: 1.0,
+            level: 80.0,
+            normal_penalty: 120.0,
+        };
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert!(model.ctx.endgame, "T70 应进入末段窗口");
+        assert!(
+            model.ctx.endgame_pressure > 0.0,
+            "满槽 5 > 剩余普通回合 1，应有超额压力"
+        );
+        assert!(
+            model.endgame_keiko_bonus(&Action::ActTrain(3)) > 0.0,
+            "满槽稽古应有加分"
+        );
+        assert_eq!(
+            model.endgame_keiko_bonus(&Action::Train(3)),
+            0.0,
+            "普通训练不吃稽古加分"
+        );
+
+        // 普通训练的机会成本：pressure 越高扣得越多
+        let before = model.action_value(&Action::Train(3));
+        cfg.endgame.normal_penalty = 0.0;
+        let model = Model::new(&game, &cfg).expect("模型");
+        let after = model.action_value(&Action::Train(3));
+        assert!(
+            before < after,
+            "普通训练应被末段机会成本压低: {before} vs {after}"
+        );
+    }
+
+    /// 末段窗口不含 URA：T72 起不进入，避免了把全稽古回合当成“浪费”
+    #[test]
+    fn endgame_window_excludes_ura() {
+        let mut game = crate::testing::sample_game_with_uma(106301);
+        game.turn = 72;
+        game.plan = game.derive_plan();
+        game.acts.gauge = [5; 5];
+        let mut cfg = game.config.trainer.clone();
+        cfg.endgame = crate::config::EndgameConfig {
+            keiko: 250.0,
+            scarcity: 1.0,
+            level: 80.0,
+            normal_penalty: 120.0,
+        };
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert!(!model.ctx.endgame, "URA 回合不进入末段窗口");
+        assert_eq!(model.ctx.endgame_pressure, 0.0);
+        assert_eq!(model.endgame_keiko_bonus(&Action::ActTrain(3)), 0.0);
+    }
+
+    /// 末段窗口从第三年合宿结束时开始：T63（合宿中）不进入，T64 进入
+    #[test]
+    fn endgame_window_starts_after_third_camp() {
+        let mut game = crate::testing::sample_game_with_uma(106301);
+        game.turn = 63;
+        game.plan.camp_zone = true;
+        game.plan.race = false;
+        game.plan.ura_period = false;
+        game.forced_rest = false;
+        let cfg = game.config.trainer.clone();
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert!(!model.ctx.endgame, "合宿中不进入末段窗口");
+
+        game.turn = 64;
+        game.plan.camp_zone = false;
+        let model = Model::new(&game, &cfg).expect("模型");
+        assert!(model.ctx.endgame, "第三年合宿结束时起进入末段窗口");
     }
 }

@@ -8,7 +8,8 @@
 
 use anyhow::{Result, anyhow};
 use rand::rngs::StdRng;
-use umaai_core::rng::{StrategyRng, StreamTag, derive_seed};
+use umaai_core::gamedata::EventData;
+use umaai_core::rng::{EventRng, StrategyRng, StreamTag, derive_seed};
 use umasim::game::base::RuleStreams;
 use umasim::game::{Game, StageId, Trainer};
 
@@ -258,27 +259,32 @@ impl MatsuriGame {
     ) -> Result<()> {
         match self.stage {
             Stage::Begin => {
-                self.plan = self.derive_plan();
-                // 目标赛回合仍按赛程分类（`plan.race`），马娘特殊事件可把本回合实际动作改为休息；
-                // 目前只登记凯斯奇迹 T65（临时表，引擎「马娘特殊事件记录」改造后迁移）。
-                self.forced_rest = is_forced_rest_turn(self.base.uma.chara_id(), self.base.turn);
-                diag!(
-                    "【回合】T{} Begin {} 类型: {}",
-                    self.base.turn,
-                    MatsuriYear::from_turn(self.base.turn).as_str(),
-                    self.diag_turn_kind()
-                );
-                // 回合开始的状态判定：友人疲劳回复（一次性）、变胖解除概率（剧本规则）
-                self.recover_fatigue();
-                self.roll_fat_recovery(strategy);
-                // 回合开始事件链：固定事件 + 友人解锁 + 随机分布（事件流）；正月事件随本回合跑，
-                // 结局 / 抽签 / 育成结束入队到 `AfterTrain`（引擎基础局同型）。
-                let mut events = self.generate_events(&mut streams.event);
-                self.append_begin_friend_event(&mut events);
-                self.queue_after_train_events();
-                for event in &events {
-                    self.run_event(event, trainer, decision, &mut streams.event)?;
+                // 事件队列**已装载**说明本次是从「事件选项搜索」的分叉局面续跑本阶段：
+                // 前置（结构派生 / 事件生成）在真实路径上已经跑过，不能重跑（重跑会再抽一次
+                // 事件流、把 CRN 位移掉），只从 `event_cursor` 继续消费，然后补跑后置。
+                if !self.event_queue_loaded {
+                    self.plan = self.derive_plan();
+                    // 目标赛回合仍按赛程分类（`plan.race`），马娘特殊事件可把本回合实际动作改为休息；
+                    // 目前只登记凯斯奇迹 T65（临时表，引擎「马娘特殊事件记录」改造后迁移）。
+                    self.forced_rest =
+                        is_forced_rest_turn(self.base.uma.chara_id(), self.base.turn);
+                    diag!(
+                        "【回合】T{} Begin {} 类型: {}",
+                        self.base.turn,
+                        MatsuriYear::from_turn(self.base.turn).as_str(),
+                        self.diag_turn_kind()
+                    );
+                    // 回合开始的状态判定：友人疲劳回复（一次性）、变胖解除概率（剧本规则）
+                    self.recover_fatigue();
+                    self.roll_fat_recovery(strategy);
+                    // 回合开始事件链：固定事件 + 友人解锁 + 随机分布（事件流）；正月事件随本回合跑，
+                    // 结局 / 抽签 / 育成结束入队到 `AfterTrain`（引擎基础局同型）。
+                    let mut events = self.generate_events(&mut streams.event);
+                    self.append_begin_friend_event(&mut events);
+                    self.queue_after_train_events();
+                    self.load_event_queue(events);
                 }
+                self.run_event_queue_from_cursor(trainer, decision, &mut streams.event)?;
                 // turn 2：NPC / 友人加入（本回合起可用）后立即授予 5 个基础教诲；
                 // 教诲效果须从本回合的分布 / 训练起生效（memo §4）。
                 if self.base.turn == crate::SCENARIO_START_TURN {
@@ -309,10 +315,13 @@ impl MatsuriGame {
             Stage::AfterTrain => {
                 // 本回合动作与训练后处理挂出的事件统一在这里结算：
                 // 比赛奖励 / 出行 / 红点 / 友人点击 / 加练 / 失败事件等。
-                let after_events = std::mem::take(&mut self.unresolved_events);
-                for event in &after_events {
-                    self.run_event(event, trainer, decision, &mut streams.event)?;
+                // 同 Begin：队列已装载 = 从事件选项搜索的分叉局面续跑，不重新 take
+                // （重新 take 会拿到空的 `unresolved_events`，把剩下的事件全丢掉）。
+                if !self.event_queue_loaded {
+                    let after_events = std::mem::take(&mut self.unresolved_events);
+                    self.load_event_queue(after_events);
                 }
+                self.run_event_queue_from_cursor(trainer, decision, &mut streams.event)?;
             }
             Stage::End => {
                 // 合宿计数：比赛 / 强制休息回合不计入，计满窗口长度后本次合宿结束。
@@ -344,6 +353,46 @@ impl MatsuriGame {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 逐项结算一批事件；队列与游标**留在局面上**（结算完清空）
+    ///
+    /// 事件选项搜索的 fork 会带着 `event_queue` / `event_cursor` 一起克隆：应用当前选项后
+    /// 从下一个事件继续，避免「应用完直接跳到下一 stage、漏掉同 stage 剩余事件」。
+    /// 正常推进路径与逐事件 `run_event` 完全等价（同序、同随机流消费）。
+    pub(crate) fn load_event_queue(&mut self, events: Vec<EventData>) {
+        self.event_queue = events;
+        self.event_cursor = 0;
+        self.event_queue_loaded = true;
+    }
+
+    /// 从 `event_cursor` 起逐项消费事件队列，消费完清空并复位装载标记
+    ///
+    /// 可重入：事件选项搜索会在这个循环**中间**分叉（`select_event_choice` → `search_event`），
+    /// 分叉局面把选项就地结算、游标 +1 之后再调 `run_stage` 回到本函数续跑。所以这里
+    /// 不能重新装载队列，只认游标。
+    pub(crate) fn run_event_queue_from_cursor<T: Trainer<Self>>(
+        &mut self,
+        trainer: &T,
+        decision: &mut StdRng,
+        event_rng: &mut EventRng,
+    ) -> Result<()> {
+        while self.event_cursor < self.event_queue.len() {
+            // 取走当前槽（留 `Default` 占位）：事件深拷贝（name + choices 嵌套 Vec）
+            // 只在这里发生一次，而不是每事件一次（上游 7252b84）。
+            //
+            // 与本仓的可重入 / 事件搜索口径相容：`search_event` 的两处
+            // `event_queue.get(cursor).is_none()` 判据都在 `run_event` **之内**（即本槽
+            // 尚未被取走）求值，rollout 分叉克隆到的也是完整的槽；分叉里先就地结算
+            // 当前选项、`cursor += 1`，再回到本函数从下一个槽续跑——被取走的槽不会再被读。
+            let event = std::mem::take(&mut self.event_queue[self.event_cursor]);
+            self.run_event(&event, trainer, decision, event_rng)?;
+            self.event_cursor += 1;
+        }
+        self.event_queue.clear();
+        self.event_cursor = 0;
+        self.event_queue_loaded = false;
         Ok(())
     }
 }

@@ -1,0 +1,50 @@
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 1.7271
+rest_vital = 64
+checkpoint_margin = 5
+act_level_target = 9
+self_race = false
+friend_outing_early = true
+status_halve_threshold = 1200
+status_halve_factor = 0.5
+friend_outing_deadline = 0
+friend_outing_urgency = 0.0000
+level_step_bonus = 0.0
+status_weights = [0.6374, 0.9881, 0.8387, 0.3000, 2.6217]
+
+[trainer.weights]
+vital = 1.4774
+motivation = 23.6572
+friendship = 0.5559
+hint = 1.1725
+gauge = 27.9217
+act_level = 0.0000
+checkpoint = 834.6247
+fat = 108.4909
+friend_outing = 120.0000
+
+[trainer.advice]
+card = 1.4462
+npc = 0.5010
+train = 0.2000
+keiko = 0.7630
+level = 0.2000
+milestone = 0.2000
+status_limit = 0.0000
+assist = 0.0000
+route = 500.0000
+
+[trainer.dynamic]
+status_catchup = 1.3553
+act_catchup = 0.0000
+vital_decay = 0.2879
+vital_idle = 0.0000
+keiko_tempo = 0.4860

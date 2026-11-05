@@ -25,6 +25,17 @@ const YEAR2_TARGETS: [i32; 2] = [601, 701];
 /// 第 3 年（turn 47）可用的融合对象：协助 / 不屈 / 兼修
 const YEAR3_TARGETS: [i32; 3] = [801, 901, 1001];
 
+/// `status_halve_factor` 的 serde 缺省值（0.5 = 超阈值减半）。
+/// 不能直接写 `#[serde(default = "0.5")]`，故用函数。
+fn default_halve_factor() -> f64 {
+    0.5
+}
+
+/// `reserve_status_factor` 的 serde 缺省值（拉面 RESERVE_STATUS_FACTOR = 40）。
+fn default_reserve_factor() -> f64 {
+    40.0
+}
+
 /// 剧本专属配置段
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,12 +62,169 @@ pub struct TrainerConfig {
     pub self_race: bool,
     /// 友人外出是否尽早用完（攻略策略；false = 按收益打分）
     pub friend_outing_early: bool,
+    /// 属性收益「减半」起算的原始属性值（0 = 关闭减半，完全按非减半表打分）。
+    ///
+    /// 口径：实机里某维属性超过该值后，单次训练/稽古的**实际入账**减半、到上限截断；
+    /// 而本模拟器的 `five_status_final_score` 评分表是**非减半**的凸表（越高边际越大）。
+    /// 决策器若直接按非减半表给「已接近上限的维」打满分，就会把回合浪费在吃不满的维上
+    /// （复盘 T76：速度已贴上限仍选速度稽古，实机只入账个位数）。修正 = 决策打分时把
+    /// 预览收益先按实机口径「上限截断 + 超阈值减半」折算成有效入账，再走非减半表换算回
+    /// 评分点。阈值与上限都用模拟器的原始（非减半）坐标，无需再做面板换算。
+    #[serde(default)]
+    pub status_halve_threshold: i32,
+    /// 超阈值部分保留的比例（0.5 = 减半；1.0 = 不减半；配合 `status_halve_threshold` 用）
+    #[serde(default = "default_halve_factor")]
+    pub status_halve_factor: f64,
+    /// 属性溢出模式：false = 现行「上限截断 + 超阈值减半」；true = 拉面式「时间感知软上限储备」。
+    /// 移植自 `xulai1001/umaai-rs` handwritten_evaluator.rs::status_soft_function（见
+    /// lab/属性溢出软上限旋钮移植.md）。默认关闭，不改变现有行为。
+    #[serde(default)]
+    pub status_soft_reserve: bool,
+    /// 软上限储备因子（拉面 RESERVE_STATUS_FACTOR = 40）。
+    /// reserve = factor × 剩余回合 × (1 − 剩余回合 /(2×总回合))；0 = 关闭软储备（退化硬上限）。
+    #[serde(default = "default_reserve_factor")]
+    pub reserve_status_factor: f64,
+    /// 终局事件预留属性（拉面 FINAL_BONUS = 115，URA 口径）。
+    /// 骏大祭终局事件不同，默认 0（不预留），重标定后再设。
+    #[serde(default)]
+    pub final_bonus: i32,
+    /// 友人外出截止回合（0 = 自动取 Senior 合宿窗口起点，即「第三年 10 月上」前后）。
+    /// 截止前必须把 5 段用完，越接近截止、剩余段数越多，打分越急迫。
+    #[serde(default)]
+    pub friend_outing_deadline: i32,
+    /// 友人外出截止急迫度权重（0 = 关闭急迫加分，只按段事件 + 演目收益打分）
+    #[serde(default)]
+    pub friend_outing_urgency: f64,
+    /// 演目 Lv 质变卡阶奖励：把有编成卡的演目从 Lv7→8 / Lv8→9 推过质变点时的额外加分
+    /// （技能pt 乘区 +80%→+100%→+135% 的大跳变；0 = 关闭）。吾妻外出抬最低演目 Lv 时同样吃到，
+    /// 自动引导「外出卡质变点」（攻略优化点 4）。
+    #[serde(default)]
+    pub level_step_bonus: f64,
+    /// 根性演目 Lv 封顶（0 = 关闭）：根 Lv 达到该值后，`level_value(根)` 归零——
+    /// 「第二年末根强化到 5 就可以不用管了」。只影响推 Lv 的打分，演目槽仍照常累积。
+    #[serde(default)]
+    pub root_level_cap: i32,
+    /// 根 Lv 封顶的截止回合（0 = 全程封顶）：turn ≥ 该值后封顶解除、根恢复正常升级打分。
+    /// 用户口径：Lv5 只是第二年末达标线（发表会 T47 = 5 演目 Lv5），第三年照升。
+    #[serde(default)]
+    pub root_level_cap_until: i32,
+    /// 根性训练最少人头（0 = 关闭）：根训练位担当数 < 该值时吃 `ROOT_TRAIN_PENALTY`
+    /// 大额惩罚——「能不点根就不点根，除非 5 人头」。
+    #[serde(default)]
+    pub root_train_min_heads: usize,
+    /// 友人外出 +Lv 是否避开根性演目（false = 沿用三则落点）——
+    /// 「外出强化最好不要给根」。三则落点选中根时改挑非根演目里最低的；全是根才回落。
+    #[serde(default)]
+    pub outing_avoid_root: bool,
+    /// 自选比赛解禁回合（0 = 关闭；仅 `self_race = true` 时有意义）：turn ≥ 该值才允许
+    /// 把自选比赛纳入打分——「第三年天秋后要是训练烂可以跑 g1」（天秋 ≈ T65，取 66）。
+    #[serde(default)]
+    pub self_race_from_turn: i32,
     /// 五维策略权重（官方评分边际之外的偏好；默认全 1）
     pub status_weights: [f64; 5],
     /// 属性 / 资源 / 事件的折算权重
     pub weights: ValueWeights,
     /// 教诲分配价值权重
     pub advice: AdviceWeights,
+    /// 动态权重（随回合 / 饱和度 / 进度调制上面三套静态权重）
+    ///
+    /// `#[serde(default)]`：默认层文件不写这一段也能解析，缺省即全 0 = 静态行为。
+    #[serde(default)]
+    pub dynamic: DynamicConfig,
+    /// 溢出处理（近顶轴让位、副属性 / PT 保留；默认层见 `data/matsuri_config.toml`）
+    #[serde(default)]
+    pub overflow: OverflowConfig,
+    /// 第三年合宿结束～T71 的稽古兑现（缺省段 = 关闭；URA 不参与）
+    #[serde(default)]
+    pub endgame: EndgameConfig,
+}
+
+/// 动态权重旋钮（逐回合调制；全部默认 `0.0` = 关闭，完全退化成静态打分）
+///
+/// 设计口径：官方评分表本身是凸的，贪心按边际打分已经能吃掉「越接近上限越值钱」，
+/// 所以这里**不重复建模边际**，只补三件贪心看不见的事——
+/// ① 五维之间的追赶（速先满就该把回合让给根 / 智）；
+/// ② 演目 Lv 之间的追赶（治 `10/10/10/8/8` 这种长尾）；
+/// ③ 体力与进度的时间价值（末期体力不值钱、领先就该卡回合、落后就该加速升级）。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DynamicConfig {
+    /// 五维追赶强度：`w[i] *= 1 + 2k(head[i] − mean_head)`，`head[i]` = 剩余空间占比
+    pub status_catchup: f64,
+    /// 演目 Lv 追赶强度：`level_value *= 1 + k·max(0, mean_lv − lv[act])`
+    pub act_catchup: f64,
+    /// 体力影子价格随回合衰减：`weights.vital *= 1 − k·(turn / max_turn)`
+    pub vital_decay: f64,
+    /// 满体力闲置惩罚放大：`idle_penalty *= 1 + k·(vital − 70) / 30`
+    pub vital_idle: f64,
+    /// 稽古节奏（卡回合 ↔ 加速升级）：`level_value *= 1 + k·(达标线 − 短板 Lv) / 3`
+    pub keiko_tempo: f64,
+}
+
+impl Default for DynamicConfig {
+    /// 全 0 = 关闭全部动态调制（与上游静态行为逐位相同）
+    fn default() -> Self {
+        Self {
+            status_catchup: 0.0,
+            act_catchup: 0.0,
+            vital_decay: 0.0,
+            vital_idle: 0.0,
+            keiko_tempo: 0.0,
+        }
+    }
+}
+
+/// 溢出处理旋钮（属性接近**生效上限**时，训练分配向其余轴倾斜）
+///
+/// 结构体缺省 `0.0` = 关闭；仓内默认层 `data/matsuri_config.toml` 取扫描档。
+/// 只作用于普通回合的训练估值，不影响事件 / 比赛 / 教诲分配的价值。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OverflowConfig {
+    /// 距生效上限多少比例内算「近顶」；`0` = 只把真正顶满的轴算近顶
+    pub margin: f64,
+    /// 非近顶轴的权重放大强度：`w[j] *= 1 + tilt * near_n / 5`
+    pub tilt: f64,
+    /// 主属性近顶时，副属性 + PT 的保留加分（防止完全放弃该训练）
+    pub keep: f64,
+}
+
+impl Default for OverflowConfig {
+    fn default() -> Self {
+        Self {
+            margin: 0.0,
+            tilt: 0.0,
+            keep: 0.0,
+        }
+    }
+}
+
+/// 第三年合宿结束～T71 的稽古兑现旋钮（URA 全稽古回合不参与）
+///
+/// 只作用于**普通回合**：满槽数多于剩余普通回合时，把回合优先让给满槽稽古，
+/// 并对普通训练加一点机会成本。结构体缺省 `0.0` = 关闭；仓内默认层取扫描档。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EndgameConfig {
+    /// 每个满槽稽古候选的基础加分
+    pub keiko: f64,
+    /// 满槽数 > 剩余普通回合数时的放大强度
+    pub scarcity: f64,
+    /// 每级未满 `act Lv` 的加分（最多按 2 级计）
+    pub level: f64,
+    /// 同一窗口普通训练的扣分（只扣 `Action::Train`，不扣休息 / 治病）
+    pub normal_penalty: f64,
+}
+
+impl Default for EndgameConfig {
+    fn default() -> Self {
+        Self {
+            keiko: 0.0,
+            scarcity: 0.0,
+            level: 0.0,
+            normal_penalty: 0.0,
+        }
+    }
 }
 
 /// 属性 / 资源 / 事件的折算权重（单位 = 评分点）
@@ -79,6 +247,10 @@ pub struct ValueWeights {
     pub checkpoint: f64,
     /// 【变胖】状态的期望惩罚（一次性）
     pub fat: f64,
+    /// 友人外出每段的基础价值（演目 Lv+1 与段事件之外的「尽早用完」策略分；
+    /// 替代原先写死的 `FRIEND_OUTING_EARLY_BONUS`，可扫参）
+    #[serde(default)]
+    pub friend_outing: f64,
 }
 
 /// 教诲分配价值权重（特征系数）
@@ -97,6 +269,20 @@ pub struct AdviceWeights {
     pub level: f64,
     /// 発表会达标急迫度权重
     pub milestone: f64,
+    /// 特化上限（601 特別稽古的 `status_limit`）权重
+    ///
+    /// `#[serde(default)]`：旧覆盖层不写也能解析，缺省 `0.0` = 与既有行为逐位一致。
+    #[serde(default)]
+    pub status_limit: f64,
+    /// 助力の支え（401 的 `support_assist` 开关量）权重
+    #[serde(default)]
+    pub assist: f64,
+    /// 落位先验权重：命中一位离线搜出的落位加这么多分（0 = 关闭）
+    ///
+    /// 先验表见 [`crate::value::ROUTE_PRIOR`]，由 `scripts/tabu_route.py` 离线搜出后内化，
+    /// 目的是不再依赖 `MATSURI_ASSIGN_PIN` 外部钉位。取值足够大时等价于硬钉位。
+    #[serde(default)]
+    pub route: f64,
 }
 
 /// 融合预设：第 2 年 2 组、第 3 年剩余 3 组
@@ -295,7 +481,7 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         );
     }
     let weights = &trainer.weights;
-    let entries: [(&str, f64); 8] = [
+    let entries: [(&str, f64); 9] = [
         ("weights.vital", weights.vital),
         ("weights.motivation", weights.motivation),
         ("weights.friendship", weights.friendship),
@@ -304,6 +490,7 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
         ("weights.act_level", weights.act_level),
         ("weights.checkpoint", weights.checkpoint),
         ("weights.fat", weights.fat),
+        ("weights.friend_outing", weights.friend_outing),
     ];
     for (name, value) in entries {
         ensure!(
@@ -311,19 +498,106 @@ fn validate_trainer(trainer: &TrainerConfig) -> Result<()> {
             "trainer.{name} 应为非负有限数"
         );
     }
+    ensure!(
+        (0..=4000).contains(&trainer.status_halve_threshold),
+        "trainer.status_halve_threshold 应在 0–4000（0 = 关闭减半）"
+    );
+    ensure!(
+        trainer.status_halve_factor.is_finite() && (0.0..=1.0).contains(&trainer.status_halve_factor),
+        "trainer.status_halve_factor 应在 0–1（0.5 = 超阈值减半）"
+    );
+    ensure!(
+        trainer.reserve_status_factor.is_finite()
+            && (0.0..=200.0).contains(&trainer.reserve_status_factor),
+        "trainer.reserve_status_factor 应在 0–200（0 = 关闭软储备）"
+    );
+    ensure!(
+        (0..=600).contains(&trainer.final_bonus),
+        "trainer.final_bonus 应在 0–600"
+    );
+    ensure!(
+        (0..=77).contains(&trainer.friend_outing_deadline),
+        "trainer.friend_outing_deadline 应在 0–77（0 = 自动取 Senior 合宿起点）"
+    );
+    ensure!(
+        trainer.friend_outing_urgency.is_finite() && trainer.friend_outing_urgency >= 0.0,
+        "trainer.friend_outing_urgency 应为非负有限数"
+    );
+    ensure!(
+        trainer.level_step_bonus.is_finite() && (0.0..=2000.0).contains(&trainer.level_step_bonus),
+        "trainer.level_step_bonus 应在 0–2000（0 = 关闭质变卡阶奖励）"
+    );
+    ensure!(
+        (0..=10).contains(&trainer.root_level_cap),
+        "trainer.root_level_cap 应在 0–10（0 = 关闭根 Lv 封顶）"
+    );
+    ensure!(
+        (0..=77).contains(&trainer.root_level_cap_until),
+        "trainer.root_level_cap_until 应在 0–77（0 = 全程封顶）"
+    );
+    ensure!(
+        trainer.root_train_min_heads <= 5,
+        "trainer.root_train_min_heads 应在 0–5（0 = 关闭根训练人头门槛）"
+    );
+    ensure!(
+        (0..=77).contains(&trainer.self_race_from_turn),
+        "trainer.self_race_from_turn 应在 0–77（0 = 关闭自选赛回合门槛）"
+    );
     let advice = &trainer.advice;
-    let entries: [(&str, f64); 6] = [
+    let entries: [(&str, f64); 9] = [
         ("advice.card", advice.card),
         ("advice.npc", advice.npc),
         ("advice.train", advice.train),
         ("advice.keiko", advice.keiko),
         ("advice.level", advice.level),
         ("advice.milestone", advice.milestone),
+        ("advice.status_limit", advice.status_limit),
+        ("advice.assist", advice.assist),
+        ("advice.route", advice.route),
     ];
     for (name, value) in entries {
         ensure!(
             value.is_finite() && value >= 0.0,
             "trainer.{name} 应为非负有限数"
+        );
+    }
+    let dynamic = &trainer.dynamic;
+    let entries: [(&str, f64, f64); 5] = [
+        ("dynamic.status_catchup", dynamic.status_catchup, 4.0),
+        ("dynamic.act_catchup", dynamic.act_catchup, 2.0),
+        ("dynamic.vital_decay", dynamic.vital_decay, 1.0),
+        ("dynamic.vital_idle", dynamic.vital_idle, 4.0),
+        ("dynamic.keiko_tempo", dynamic.keiko_tempo, 4.0),
+    ];
+    for (name, value, upper) in entries {
+        ensure!(
+            value.is_finite() && (0.0..=upper).contains(&value),
+            "trainer.{name} 应在 0–{upper}（实际 {value}）"
+        );
+    }
+    let overflow = &trainer.overflow;
+    let entries: [(&str, f64, f64); 3] = [
+        ("overflow.margin", overflow.margin, 0.5),
+        ("overflow.tilt", overflow.tilt, 4.0),
+        ("overflow.keep", overflow.keep, 2.0),
+    ];
+    for (name, value, upper) in entries {
+        ensure!(
+            value.is_finite() && (0.0..=upper).contains(&value),
+            "trainer.{name} 应在 0–{upper}（实际 {value}）"
+        );
+    }
+    let endgame = &trainer.endgame;
+    let entries: [(&str, f64, f64); 4] = [
+        ("endgame.keiko", endgame.keiko, 1000.0),
+        ("endgame.scarcity", endgame.scarcity, 4.0),
+        ("endgame.level", endgame.level, 500.0),
+        ("endgame.normal_penalty", endgame.normal_penalty, 1000.0),
+    ];
+    for (name, value, upper) in entries {
+        ensure!(
+            value.is_finite() && (0.0..=upper).contains(&value),
+            "trainer.{name} 应在 0–{upper}（实际 {value}）"
         );
     }
     Ok(())
@@ -374,6 +648,19 @@ impl Default for TrainerConfig {
             act_level_target: 8,
             self_race: false,
             friend_outing_early: true,
+            status_halve_threshold: 0,
+            status_halve_factor: 0.5,
+            status_soft_reserve: false,
+            reserve_status_factor: 40.0,
+            final_bonus: 0,
+            friend_outing_deadline: 0,
+            friend_outing_urgency: 0.0,
+            level_step_bonus: 0.0,
+            root_level_cap: 0,
+            root_level_cap_until: 0,
+            root_train_min_heads: 0,
+            outing_avoid_root: false,
+            self_race_from_turn: 0,
             status_weights: [1.0; 5],
             weights: ValueWeights {
                 vital: 1.2,
@@ -384,6 +671,7 @@ impl Default for TrainerConfig {
                 act_level: 120.0,
                 checkpoint: 800.0,
                 fat: 120.0,
+                friend_outing: 120.0,
             },
             advice: AdviceWeights {
                 card: 1.0,
@@ -392,7 +680,17 @@ impl Default for TrainerConfig {
                 keiko: 1.0,
                 level: 1.0,
                 milestone: 1.0,
+                status_limit: 0.0,
+                assist: 0.0,
+                route: 0.0,
             },
+            dynamic: DynamicConfig::default(),
+            // 与 lab 默认层 data/matsuri_config.toml 同值：两个行为旋钮都关。
+            // 上游代码缺省里带扫描档（0.02/0.5/0.15、250/1/80/120），本仓不跟——
+            // 那份值是写在它的默认层文件里的，代码缺省跟着开会让 rollout 兜底训练员
+            // （MatsuriConfig::default()）与实局配置口径不一致。
+            overflow: OverflowConfig::default(),
+            endgame: EndgameConfig::default(),
         }
     }
 }
@@ -512,6 +810,55 @@ mod tests {
             MatsuriConfig::default().fusion,
             "fusion 段不受影响"
         );
+        assert_eq!(
+            cfg.trainer.dynamic,
+            DynamicConfig::default(),
+            "trainer.dynamic 缺省 = 全 0（关闭动态调制，退化成静态打分）"
+        );
+    }
+
+    /// 动态权重旋钮越界应被拒绝（扫参硬边界，不静默回退）
+    #[test]
+    fn dynamic_bad_values_rejected() {
+        let overlay = "[trainer]\n\
+                       pt_favor_rate = 2.0\n\
+                       rest_vital = 45\n\
+                       checkpoint_margin = 3\n\
+                       act_level_target = 8\n\
+                       self_race = false\n\
+                       friend_outing_early = true\n\
+                       status_weights = [1.0, 1.0, 1.0, 1.0, 1.0]\n\
+                       [trainer.weights]\n\
+                       vital = 1.2\n\
+                       motivation = 30.0\n\
+                       friendship = 0.6\n\
+                       hint = 1.0\n\
+                       gauge = 25.0\n\
+                       act_level = 120.0\n\
+                       checkpoint = 800.0\n\
+                       fat = 120.0\n\
+                       [trainer.advice]\n\
+                       card = 1.0\n\
+                       npc = 0.6\n\
+                       train = 1.0\n\
+                       keiko = 1.0\n\
+                       level = 1.0\n\
+                       milestone = 1.0\n\
+                       [trainer.dynamic]\n\
+                       vital_decay = 1.5\n";
+        assert!(
+            MatsuriConfig::parse(&repo_text(), Some(overlay)).is_err(),
+            "vital_decay 超过 1 应报错"
+        );
+        let bad = overlay.replace("vital_decay = 1.5", "status_catchup = -0.5");
+        assert!(
+            MatsuriConfig::parse(&repo_text(), Some(&bad)).is_err(),
+            "负的 status_catchup 应报错"
+        );
+        let ok = overlay.replace("vital_decay = 1.5", "keiko_tempo = 2.0");
+        let cfg = MatsuriConfig::parse(&repo_text(), Some(&ok)).expect("合法动态档应可解析");
+        assert_eq!(cfg.trainer.dynamic.keiko_tempo, 2.0);
+        assert_eq!(cfg.trainer.dynamic.act_catchup, 0.0, "未写的旋钮取 0");
     }
 
     #[test]

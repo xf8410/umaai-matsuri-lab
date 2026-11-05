@@ -1,0 +1,45 @@
+# 实验室覆盖层 · 动态权重变体 d-tempo
+# 单变量实验：在 w-uniform（当前最优，100 局均分 64509.8）之上只开一个动态旋钮。
+# 稽古节奏 keiko_tempo=1.0
+# 与达标线（Lv1 → Senior 合宿前 act_level_target → 收尾 Lv10）比短板演目 Lv：
+# 落后 → level_value 放大（加速升级）；领先 → 缩小（卡回合，让休息/出行有机会赢）。
+# 全部动态旋钮默认 0 = 关闭；这里只开一个，便于归因。
+# [trainer.dynamic] 有容器级 serde(default)，所以只写一个键、其余自动取 0。
+
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 2.2
+rest_vital = 48
+checkpoint_margin = 4
+act_level_target = 10
+self_race = false
+friend_outing_early = true
+status_weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+[trainer.weights]
+vital = 1.4
+motivation = 35.0
+friendship = 1.0
+hint = 1.0
+gauge = 28.0
+act_level = 180.0
+checkpoint = 1000.0
+fat = 130.0
+
+[trainer.advice]
+card = 1.1
+npc = 0.6
+train = 1.0
+keiko = 1.3
+level = 1.3
+milestone = 1.1
+
+[trainer.dynamic]
+keiko_tempo = 1.0

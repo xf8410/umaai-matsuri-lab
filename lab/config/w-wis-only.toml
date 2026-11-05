@@ -1,0 +1,43 @@
+# 实验室覆盖层 · 权重变体 w-wis-only
+# 单变量实验：只改 status_weights，其余全部沿用变体C。
+# 只把智从 0.6 抬回 1.2，其余不动（单变量隔离）
+# 基线（变体C，status_weights = [1.05, 1.05, 1.25, 1.2, 0.6]）100 局均分 63878.7。
+
+# 合并语义（见 crates/matsuri-core/src/config.rs）：
+#   [fusion] 列表整段替换；[trainer] 给了就整段替换（不按字段合并）。
+#   所以本文件必须给全 trainer 的每一个键。
+
+[fusion]
+year2 = [{ base = 101, target = 601 }, { base = 201, target = 701 }]
+year3 = [
+    { base = 501, target = 801 },
+    { base = 301, target = 901 },
+    { base = 401, target = 1001 },
+]
+
+[trainer]
+pt_favor_rate = 2.2
+rest_vital = 48
+checkpoint_margin = 4
+act_level_target = 10
+self_race = false
+friend_outing_early = true
+status_weights = [1.05, 1.05, 1.25, 1.2, 1.2]
+
+[trainer.weights]
+vital = 1.4
+motivation = 35.0
+friendship = 1.0
+hint = 1.0
+gauge = 28.0
+act_level = 180.0
+checkpoint = 1000.0
+fat = 130.0
+
+[trainer.advice]
+card = 1.1
+npc = 0.6
+train = 1.0
+keiko = 1.3
+level = 1.3
+milestone = 1.1

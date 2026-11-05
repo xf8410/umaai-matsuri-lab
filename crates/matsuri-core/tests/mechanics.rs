@@ -23,6 +23,7 @@ use umaai::Config;
 use umaai_core::Data;
 use umaai_core::gamedata::EventChoice;
 use umasim::game::{FriendOutState, Game, Person, SupportCard, Trainer};
+use umasim::search::FlatSearchGame;
 
 /// 5 段友人出行的演目 Lv 期望：每段 Lv+1（三则落点）→ 槽+1（满槽跳过，三则落点）
 fn expected_outing_levels(level: [i32; 5], gauge: [i32; 5], gauge_max: i32) -> [i32; 5] {
@@ -2119,6 +2120,47 @@ fn handwritten_trainer_is_deterministic() -> Result<()> {
         "手写训练员确定性 OK：评分 {score} / PT {} / 阶段 {}",
         first.uma().skill_pt,
         first.turn().max(0)
+    );
+    Ok(())
+}
+
+/// rollout 分支静默事件明细（上游 7252b84 的守门测试）：
+/// `record_events` 只是「记不记明细」的开关，不许碰任何随机流或结算——
+/// 关掉之后整局评分 / PT 必须逐位一致，且 `event_log` 为空；`fork_for_rollout` 默认关掉。
+#[test]
+fn rollout_fork_skips_event_log_without_changing_game() -> Result<()> {
+    let repo = Repo::load()?;
+    let trainer = MatsuriTrainer::new(MatsuriConfig::default());
+
+    let mut base = repo.game(repo.cfg.sim.uma)?;
+    base.set_rule_master(61444);
+
+    let mut quiet = base.clone();
+    quiet.record_events = false;
+    let normal = drive_full_game(base.clone(), &trainer)?;
+    let quiet = drive_full_game(quiet, &trainer)?;
+    assert_eq!(
+        normal.uma().calc_score()?,
+        quiet.uma().calc_score()?,
+        "事件明细开关不应改变评分"
+    );
+    assert_eq!(
+        normal.uma().total_pt()?,
+        quiet.uma().total_pt()?,
+        "事件明细开关不应改变 PT"
+    );
+    assert_eq!(normal.uma().five_status, quiet.uma().five_status, "五维一致");
+    assert!(!normal.event_log.is_empty(), "正常局面应记录事件");
+    assert!(quiet.event_log.is_empty(), "静默局面不应记录事件");
+
+    let mut forked = base.fork_for_rollout(61444);
+    assert!(!forked.record_events, "fork_for_rollout 应关闭事件明细");
+    forked = drive_full_game(forked, &trainer)?;
+    assert!(forked.event_log.is_empty(), "rollout 分支不应记录事件");
+    assert_eq!(
+        forked.uma().calc_score()?,
+        normal.uma().calc_score()?,
+        "rollout 分支的评分应与正常局面一致（同主种子）"
     );
     Ok(())
 }

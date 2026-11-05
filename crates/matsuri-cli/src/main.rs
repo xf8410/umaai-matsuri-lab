@@ -77,7 +77,61 @@ fn run() -> Result<()> {
     let mut runner = Runner::new(&cfg, &mut fe)?;
     match trainer_name.as_str() {
         "matsuri" => {
-            let trainer = MatsuriTrainer::new(matsuri_cfg);
+            // 蒙特卡洛（引擎 FlatSearch）由环境变量显式开启，默认关：
+            // 搜索成本 = 决策点数 × 剪枝宽度 × search_n 局终局 rollout，
+            // 开着跑 100 局矩阵不现实，只在验证 / 蒸馏时打开。
+            let search_n: usize = std::env::var("MATSURI_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let topk: usize = std::env::var("MATSURI_SEARCH_TOPK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4);
+            let mut search = cfg.search.clone();
+            search.search_n = search_n;
+            // 激进度：内核定档 50 会把排序压到 rollout 分数的高尾，教诲只有 6 个决策点、
+            // 每点几十万次 rollout 的噪声下等于放大方差；可扫参，缺省沿用配置层
+            if let Ok(v) = std::env::var("MATSURI_SEARCH_RADICAL")
+                && let Ok(radical) = v.trim().parse::<f64>()
+            {
+                search.radical_factor_max = radical;
+            }
+            // 攻略优化点 3：合宿训练回合的前瞻搜索，独立于教诲搜索开关（可单独 A/B）
+            let camp_search_n: usize = std::env::var("MATSURI_CAMP_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let camp_topk: usize = std::env::var("MATSURI_CAMP_SEARCH_TOPK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4);
+            let mut camp_search = cfg.search.clone();
+            camp_search.search_n = camp_search_n;
+            // 攻略优化点 1：常规回合稽古洗牌前瞻，同样独立开关（成本高于合宿，~65 决策点/局）
+            let normal_search_n: usize = std::env::var("MATSURI_NORMAL_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let normal_topk: usize = std::env::var("MATSURI_NORMAL_SEARCH_TOPK")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4);
+            let mut normal_search = cfg.search.clone();
+            normal_search.search_n = normal_search_n;
+            // 事件选项前瞻（上游 21b278c 第四路）：事件多、每个只有 2–3 个选项，
+            // 成本量级与常规前瞻相当，独立开关便于单独 A/B
+            let event_search_n: usize = std::env::var("MATSURI_EVENT_SEARCH_N")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            let mut event_search = cfg.search.clone();
+            event_search.search_n = event_search_n;
+            let trainer = MatsuriTrainer::new(matsuri_cfg)
+                .with_search(search, topk)
+                .with_camp_search(camp_search, camp_topk)
+                .with_normal_search(normal_search, normal_topk)
+                .with_event_search(event_search);
             runner.run_game(game, &trainer, None)?;
         }
         "random" => {

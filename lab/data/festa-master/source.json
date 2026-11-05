@@ -1,0 +1,24 @@
+{
+  "source": "Japanese game master.mdb",
+  "sourcePath": "G:/DMM/Umamusume/umamusume_Data/Persistent/master/master.mdb",
+  "sha256": "4538336047066a76f4723d942010ac6fa3f21c958cbf5cf6b99642f97add3886",
+  "tables": [
+    "single_mode_15_act_info",
+    "single_mode_15_advice",
+    "single_mode_15_advice_effect",
+    "single_mode_15_fusion_effect",
+    "single_mode_15_act_effect",
+    "single_mode_15_schedule"
+  ],
+  "textCategories": {
+    "142": "index 47 -> assistance condition name referenced by effect_type 20",
+    "143": "index 47 -> assistance condition description (three training applications, not three acquisition stacks)",
+    "458": "act_effect.id -> effect description",
+    "461": "minimum advice_effect.id per (advice_id, level) -> complete advice description",
+    "462": "act_type -> act name",
+    "463": "advice_id -> advice name",
+    "466": "minimum fusion_effect.id per advice_id -> complete fusion description"
+  },
+  "generator": "scripts/generate_festa_data.py",
+  "translation": "Simplified Chinese descriptions preserve the conditions and values in the Japanese source text."
+}
