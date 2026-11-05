@@ -38,6 +38,63 @@ pub(crate) struct TrainingUpper {
     pub motivation: i32,
 }
 
+/// 训练标签（诊断用；`Display` 只在日志打开时求值，避免每次结算一次 `String` 分配）
+pub(crate) struct TrainingLabel {
+    /// 是否稽古
+    pub(crate) keiko: bool,
+    /// 训练位（普通训练）
+    pub(crate) train: usize,
+    /// 演目下标（稽古；普通训练为 `None`，不查表）
+    pub(crate) act: Option<usize>,
+}
+
+impl std::fmt::Display for TrainingLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.keiko {
+            write!(f, "稽古#{}", self.act.unwrap_or(self.train))
+        } else {
+            write!(f, "训练#{}", self.train)
+        }
+    }
+}
+
+/// 训练后摘要（诊断用；`Display` 只在日志打开时求值，正常跑局零分配）
+struct AfterTrainSummary {
+    friendship_sum: i32,
+    friendship_count: i32,
+    hint_count: usize,
+    queued: usize,
+    friend_clicked: bool,
+    yayoi_clicked: bool,
+    reporter_clicked: bool,
+}
+
+impl std::fmt::Display for AfterTrainSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "羁绊+{}（{} 人）",
+            self.friendship_sum, self.friendship_count
+        )?;
+        if self.hint_count > 0 {
+            write!(f, " 灵感 {} 人", self.hint_count)?;
+        }
+        if self.queued > 0 {
+            write!(f, " 追加事件 {}", self.queued)?;
+        }
+        if self.friend_clicked {
+            write!(f, " 友人点击")?;
+        }
+        if self.yayoi_clicked {
+            write!(f, " 理事长点击")?;
+        }
+        if self.reporter_clicked {
+            write!(f, " 记者点击")?;
+        }
+        Ok(())
+    }
+}
+
 impl MatsuriGame {
     /// 训练 / 演目稽古预览（S8 手动核对 / 前端面板）
     ///
@@ -204,10 +261,10 @@ impl MatsuriGame {
     fn settle_training(&mut self, train: usize, keiko: bool, rng: &mut impl Rng) -> Result<()> {
         // 诊断：结算前快照（成功 / 失败都打一行「动作 + 变化」）
         let before = self.key_state();
-        let label = if keiko {
-            format!("稽古#{}", self.act_of_train(train))
-        } else {
-            format!("训练#{train}")
+        let label = TrainingLabel {
+            keiko,
+            train,
+            act: keiko.then(|| self.act_of_train(train)),
         };
         let buffs = self.calc_training_buff(train)?;
         let failure_rate = self.calc_training_failure_rate(&buffs, train)?;
@@ -421,12 +478,13 @@ impl MatsuriGame {
         let mut friendship_count = 0;
         let advice = self.participant_advice(train);
         let lesson = advice.relationship_gain;
-        let touches = self.base.distribution[train].clone();
         let mut hint_persons: Vec<usize> = Vec::new();
         let mut friend_clicked = false;
         let mut yayoi_clicked = false;
         let mut reporter_clicked = false;
-        for index in touches {
+        // 逐下标读参与名单（原实现整条 clone，一次训练一次分配）
+        for index in 0..self.base.distribution[train].len() {
+            let index = self.base.distribution[train][index];
             if index < 0 {
                 continue;
             }
@@ -530,29 +588,22 @@ impl MatsuriGame {
                 }
             }
         }
-        let mut parts = vec![format!("羁绊+{friendship_sum}（{friendship_count} 人）")];
-        if !hint_persons.is_empty() {
-            parts.push(format!("灵感 {} 人", hint_persons.len()));
-        }
         let queued = self.unresolved_events.len() - queued_before;
-        if queued > 0 {
-            parts.push(format!("追加事件 {queued}"));
-        }
-        if friend_clicked {
-            parts.push("友人点击".to_string());
-        }
-        if yayoi_clicked {
-            parts.push("理事长点击".to_string());
-        }
-        if reporter_clicked {
-            parts.push("记者点击".to_string());
-        }
-        let label = if keiko {
-            format!("稽古#{}", self.act_of_train(train))
-        } else {
-            format!("训练#{train}")
+        let summary = AfterTrainSummary {
+            friendship_sum,
+            friendship_count,
+            hint_count: hint_persons.len(),
+            queued,
+            friend_clicked,
+            yayoi_clicked,
+            reporter_clicked,
         };
-        diag!("【训练后】T{} {label} {}", self.turn(), parts.join(" "));
+        let label = TrainingLabel {
+            keiko,
+            train,
+            act: keiko.then(|| self.act_of_train(train)),
+        };
+        diag!("【训练后】T{} {label} {summary}", self.turn());
         Ok(())
     }
 
